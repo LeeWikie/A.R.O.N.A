@@ -1,0 +1,40 @@
+# Local dependencies and build outputs
+node_modules/
+dist/
+build/
+out/
+coverage/
+.cache/
+*.tsbuildinfo
+**/bin/
+**/obj/
+
+# Editors and operating system files
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+.DS_Store
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+
+# Private runtime data, memory, imports and scratch work
+/.private/
+/work/
+/data/
+/runtime/
+/logs/
+/memory/
+/MEMORY/
+/imports/
+/backups/
+*.log
+
