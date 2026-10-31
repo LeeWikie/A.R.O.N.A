@@ -7,6 +7,8 @@ import path from 'node:path';
 export async function removeTemp(directory: string) {
   const resolved = path.resolve(directory);
   if (!resolved.startsWith(path.resolve(os.tmpdir()) + path.sep) || !path.basename(resolved).startsWith('arona-')) throw new Error('Unexpected temporary path');
+  // Closed libSQL mappings can remain pinned until native finalizers run on Windows.
+  if (process.platform === 'win32') global.gc?.();
   await fs.rm(resolved, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
