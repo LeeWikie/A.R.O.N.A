@@ -7,7 +7,7 @@ type Row = Record<string, unknown>;
 const now = () => new Date().toISOString();
 
 export class Store {
-  private readonly db: DatabaseSync;
+  readonly db: DatabaseSync;
   constructor(file: string) {
     this.db = new DatabaseSync(file);
     this.db.exec(`
@@ -116,7 +116,7 @@ export class Store {
       if (!signal || signal.runId !== input.runId || signal.status !== 'accepted') {
         throw new AppError('output_source_not_in_run');
       }
-      if (signal.output.kind !== input.kind) throw new AppError('output_kind_not_allowed');
+      if (signal.output.kind !== 'both' && signal.output.kind !== input.kind) throw new AppError('output_kind_not_allowed');
       if (destination && destination !== signal.output.contextId) throw new AppError('output_target_conflict');
       destination = signal.output.contextId;
     }
@@ -134,6 +134,11 @@ export class Store {
       .all(options.after, options.kind ?? null, options.kind ?? null,
         options.contextId ?? null, options.contextId ?? null, options.limit ?? 100);
     return rows.map((row) => this.output(row));
+  }
+
+  outputsForSignal(signalId: string): OutputRecord[] {
+    return this.db.prepare('SELECT * FROM outputs WHERE EXISTS(SELECT 1 FROM json_each(signal_ids) WHERE value=?) ORDER BY seq')
+      .all(signalId).map(row => this.output(row));
   }
 
   private output(row: Row): OutputRecord {

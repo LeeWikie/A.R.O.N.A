@@ -8,25 +8,27 @@ export class AppError extends Error {
 }
 
 export const contextIdSchema = z.string().min(1).max(128).regex(/^[\w.-]+$/);
-export const signalSchema = z.object({
+const signalFields = z.object({
   id: z.string().uuid().default(randomUUID),
   contextId: contextIdSchema.default('main'),
   source: z.string().trim().min(1).max(128),
-  type: z.enum(['user-message', 'external-event']),
   content: z.string().min(1).max(64_000),
   output: z.object({
-    kind: z.enum(['message', 'artifact']),
+    kind: z.enum(['message', 'artifact', 'both']),
     contextId: contextIdSchema.optional(),
   }).strict().optional(),
-}).strict().transform((signal) => ({
+}).strict();
+const normalizeSignal = <T extends z.infer<typeof signalFields> & { type: 'user-message' | 'external-event' | 'scheduled-task' }>(signal: T) => ({
   ...signal,
   output: {
     kind: signal.output?.kind ?? (signal.type === 'user-message' ? 'message' : 'artifact'),
     contextId: signal.output?.contextId ?? signal.contextId,
   },
-}));
+});
+export const signalSchema = signalFields.extend({ type: z.enum(['user-message', 'external-event']) }).transform(normalizeSignal);
+export const scheduledSignalSchema = signalFields.extend({ type: z.literal('scheduled-task') }).transform(normalizeSignal);
 
-export type SignalInput = z.output<typeof signalSchema>;
+export type SignalInput = z.output<typeof signalSchema> | z.output<typeof scheduledSignalSchema>;
 export type SignalRecord = SignalInput & {
   status: 'received' | 'accepted' | 'rejected' | 'interrupted';
   nativeSignalId: string | null;

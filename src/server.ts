@@ -6,7 +6,7 @@ import { AppError } from './domain.js';
 
 async function main() {
   const config = readConfig();
-  const core = await Core.open({ dataDir: config.dataDir, modelConfig: config.model });
+  const core = await Core.open({ dataDir: config.dataDir, modelConfig: config.model, timezone: config.timezone });
   const server = serve({ fetch: createApp(core).fetch, hostname: '127.0.0.1', port: config.port });
   server.on('error', () => {
     console.error('listen_failed');

@@ -17,6 +17,38 @@ export function createApp(core: Core) {
     (error instanceof AppError ? error.status : 500) as 400));
   app.notFound((c) => c.json({ error: 'not_found' }, 404));
   app.get('/health', (c) => c.json({ status: 'ok' }));
+  const readJSON = async (request: Request) => {
+    try { return await request.json() as unknown; }
+    catch { throw new AppError('invalid_json'); }
+  };
+  const operationKey = (request: Request) => {
+    const key = request.headers.get('Idempotency-Key');
+    if (key !== null && !/^[\w.-]{1,128}$/.test(key)) throw new AppError('invalid_operation_id');
+    return key ? `http:${key}` : undefined;
+  };
+  app.get('/schedules', (c) => {
+    const contextId = c.req.query('contextId');
+    if (contextId && !contextIdSchema.safeParse(contextId).success) throw new AppError('invalid_context');
+    return c.json({ ...core.schedules.now(), schedules: core.schedules.list(contextId) });
+  });
+  app.get('/schedules/:id', (c) => c.json(core.schedules.get(c.req.param('id'))));
+  app.post('/schedules', async (c) => c.json(core.schedules.create(await readJSON(c.req.raw), operationKey(c.req.raw)), 201));
+  app.patch('/schedules/:id', async (c) => c.json(core.schedules.update(c.req.param('id'), await readJSON(c.req.raw), operationKey(c.req.raw))));
+  for (const action of ['pause', 'resume', 'cancel'] as const) {
+    app.post(`/schedules/:id/${action}`, async (c) => {
+      const parsed = z.object({ revision: z.number().int().positive() }).strict().safeParse(await readJSON(c.req.raw));
+      if (!parsed.success) throw new AppError('invalid_schedule_control');
+      return c.json(core.schedules.control(c.req.param('id'), action, parsed.data.revision, operationKey(c.req.raw)));
+    });
+  }
+  app.post('/schedules/:id/run', async (c) => c.json(await core.schedules.run(c.req.param('id'), operationKey(c.req.raw)), 202));
+  app.get('/schedules/:id/occurrences', (c) => {
+    const offset = integer(c.req.query('offset'), 0);
+    const limit = integer(c.req.query('limit'), 40, 100);
+    if (!limit) throw new AppError('invalid_query');
+    const occurrences = core.schedules.occurrences(c.req.param('id'), offset, limit);
+    return c.json({ occurrences, nextOffset: offset + occurrences.length });
+  });
   app.post('/signals', async (c) => {
     let body: unknown;
     try { body = await c.req.json(); }

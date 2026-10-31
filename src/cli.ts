@@ -1,5 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { Client, OutputCursor, watchOutputs } from './client.js';
 import { AppError } from './domain.js';
@@ -11,6 +13,30 @@ async function main() {
   const contextId = process.env.ARONA_CONTEXT_ID ?? 'main';
   const directory = path.join(process.env.ARONA_DATA_DIR || path.join(os.homedir(), '.arona'), 'client');
   const client = new Client(baseURL);
+  if (command === 'schedules') {
+    const action = args.shift() ?? 'list';
+    const id = action === 'list' || action === 'create' ? undefined : args.shift();
+    if (action !== 'list' && action !== 'create' && !id) throw new AppError('id_required');
+    const route = id ? `/schedules/${encodeURIComponent(id)}` : '/schedules';
+    let body: unknown;
+    let method = 'GET';
+    let suffix = '';
+    if (action === 'create' || action === 'update') {
+      const raw = args.join(' ');
+      try { body = JSON.parse(raw.startsWith('@') ? fs.readFileSync(raw.slice(1), 'utf8') : raw); }
+      catch { throw new AppError('invalid_schedule_json'); }
+      method = action === 'create' ? 'POST' : 'PATCH';
+    } else if (['pause', 'resume', 'cancel'].includes(action)) {
+      body = { revision: Number(args[0]) }; method = 'POST'; suffix = `/${action}`;
+    } else if (action === 'run') { method = 'POST'; suffix = '/run'; }
+    else if (action === 'history') suffix = `/occurrences?offset=${encodeURIComponent(args[0] ?? '0')}`;
+    else if (action !== 'list' && action !== 'get') throw new AppError('unknown_schedule_command');
+    console.log(JSON.stringify(await client.request(route + suffix, {
+      method, headers: { 'content-type': 'application/json', 'Idempotency-Key': randomUUID() },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }), null, 2));
+    return;
+  }
   if (command === 'send' || command === 'event') {
     const text = args.join(' ');
     if (!text.trim()) throw new AppError('text_required');

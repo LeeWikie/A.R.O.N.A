@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { AppError } from './domain.js';
+import { validateTimezone } from './schedules.js';
 
 const modelSchema = z.object({
   protocol: z.enum(['chat-completions', 'responses', 'messages']),
@@ -16,6 +17,7 @@ export interface Config {
   port: number;
   dataDir: string;
   model: ModelConfig;
+  timezone: string;
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -38,5 +40,6 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port,
     dataDir: path.resolve(env.ARONA_DATA_DIR || path.join(os.homedir(), '.arona')),
     model: model.data,
+    timezone: validateTimezone(env.ARONA_TIMEZONE ?? Intl.DateTimeFormat().resolvedOptions().timeZone),
   };
 }

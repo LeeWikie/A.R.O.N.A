@@ -40,7 +40,7 @@ export function scriptedModel(options: { gate?: Promise<void>; fail?: boolean; o
       const text = request.prompt.flatMap(message => typeof message.content === 'string' ? [message.content]
         : message.content.flatMap(part => part.type === 'text' && 'text' in part ? [part.text] : [])).join('\n');
       const inputs = new Map<string, string>();
-      for (const tag of text.matchAll(/<(?:user|external-event)\b[^>]*>/g)) {
+      for (const tag of text.matchAll(/<(?:user|external-event|scheduled-task)\b[^>]*>/g)) {
         const id = /signal_id="([0-9a-f-]{36})"/.exec(tag[0])?.[1];
         const kind = /output_kind="(message|artifact)"/.exec(tag[0])?.[1];
         if (id && kind) inputs.set(id, kind);
