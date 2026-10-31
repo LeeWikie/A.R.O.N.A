@@ -37,4 +37,7 @@ Thumbs.db
 /imports/
 /backups/
 *.log
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
