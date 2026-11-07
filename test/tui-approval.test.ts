@@ -80,6 +80,9 @@ test('a background task approval opens from the chat once input is idle, Esc pos
     assert.equal(core.runtime.approval(approval.id).status, 'approved');
     const done = await until(() => core.runtime.task(task.id), row => !['pending', 'running', 'waiting'].includes(row.status));
     assert.equal(done.status, 'succeeded');
+    const lines = () => (app as unknown as { transcript: { children: Array<{ text?: string }> } }).transcript.children.map(child => child.text ?? '').join('\n');
+    await until(lines, text => text.includes('后台任务已完成：Write file'));
+    assert.equal((app as unknown as { activeTasks: number }).activeTasks, 0);
     assert.equal(core.runtime.task(task.id).toolGrants?.length, 1, 'task scope recorded a grant');
     await app.stop(); await running;
   } finally {

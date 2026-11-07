@@ -351,6 +351,30 @@ export class TerminalApp {
   private readonly footer = new Text('', 1, 0);
   private readonly queuePreview = new Container();
   private readonly userRows = new Map<string, { view: Text; status: string }>();
+  private activeTasks = 0;
+  private readonly taskStates = new Map<string, string>();
+  private tasksLoaded = false;
+  private taskVersion = 0;
+  /** Hermes-style "N background tasks running" plus one line when a task this client saw running ends. */
+  private async refreshTasks() {
+    const version = ++this.taskVersion;
+    try {
+      const { tasks } = await this.request<{ tasks: TaskRecord[] }>('/tasks', { signal: this.lifetime.signal });
+      if (this.stopped || version !== this.taskVersion) return;
+      const active = ['pending', 'running', 'waiting', 'pausing', 'cancelling'];
+      const ended: Record<string, [string, 'success' | 'error' | 'warning' | 'muted']> = { succeeded: ['已完成', 'success'], failed: ['失败', 'error'], blocked: ['受阻', 'warning'], cancelled: ['已取消', 'muted'], interrupted: ['已中断', 'warning'], unreported: ['结束但未报告结果', 'warning'], paused: ['已暂停', 'warning'] };
+      for (const task of tasks) {
+        const before = this.taskStates.get(task.id);
+        if (this.tasksLoaded && before && active.includes(before) && ended[task.status]) {
+          const [text, tone] = ended[task.status]!;
+          this.transcript.addChild(new Text(theme.fg(tone, `后台任务${text}：${label(task.title)}`) + theme.fg('dim', ' · /tasks 查看'), 1, 0));
+        }
+        this.taskStates.set(task.id, task.status);
+      }
+      this.tasksLoaded = true;
+      this.activeTasks = tasks.filter(task => active.includes(task.status)).length; this.status(this.statusText);
+    } catch { /* Task list is informational here. */ }
+  }
   private pendingApprovals: ApprovalRecord[] = [];
   private readonly postponedApprovals = new Set<string>();
   private approvalOpen?: string;
@@ -597,7 +621,7 @@ export class TerminalApp {
     const attachmentCount = this.pendingAttachments.get(this.contextId)?.length ?? 0;
     const tone = /错误|失败|断开/.test(text) ? 'error' : /处理中|连接中|重连/.test(text) ? 'warning' : 'success';
     const model = this.model ? `${label(this.model.name)} • ${this.model.thinkingLevel ? label(this.model.thinkingLevel) : '思考：供应商默认'}` : '';
-    const parts = [theme.fg(tone, label(text)), this.capacityText, this.usageText && theme.fg('dim', this.usageText), this.queueCount ? theme.fg('warning', `队列 ${this.queueCount}`) : '', attachmentCount ? theme.fg('dim', `待发送附件 ${attachmentCount}`) : '', this.pendingApprovals.length ? theme.fg('warning', `待审批 ${this.pendingApprovals.length}`) : '', model && theme.thinking(this.model?.thinkingLevel ?? 'off', model)].filter(Boolean);
+    const parts = [theme.fg(tone, label(text)), this.capacityText, this.usageText && theme.fg('dim', this.usageText), this.queueCount ? theme.fg('warning', `队列 ${this.queueCount}`) : '', attachmentCount ? theme.fg('dim', `待发送附件 ${attachmentCount}`) : '', this.pendingApprovals.length ? theme.fg('warning', `待审批 ${this.pendingApprovals.length}`) : '', this.activeTasks ? theme.fg('muted', `后台任务 ${this.activeTasks}`) : '', model && theme.thinking(this.model?.thinkingLevel ?? 'off', model)].filter(Boolean);
     this.footer.setText(`${parts.join(theme.fg('dim', '  ·  '))}\n${theme.fg('dim', '/help 命令  /menu 管理  /quit 退出  ·  Shift+Tab 思考等级  ·  PageUp/PageDown 浏览')}`);
     this.ui.requestRender();
   }
@@ -689,7 +713,7 @@ export class TerminalApp {
       }
       if (!this.seededHistory.has(context)) { for (const value of history.slice(-100)) this.editor.addToHistory(value); this.seededHistory.add(context); }
       this.contextReady = true;
-      void this.presentApproval();
+      void this.presentApproval(); void this.refreshTasks();
       this.status('已连接'); void this.refreshQueue(); void this.connectStream(generation);
     } catch {
       if (this.stopped || generation !== this.generation) return;
@@ -716,6 +740,7 @@ export class TerminalApp {
   private event(event: PublicEvent) {
     // Approvals are global: the footer counts every context and the prompt opens when you enter it.
     if (event.kind === 'state' && (event.data as { area?: string } | undefined)?.area === 'approvals') { void this.refreshApprovals(); return; }
+    if (event.kind === 'state' && (event.data as { area?: string } | undefined)?.area === 'tasks') { void this.refreshTasks(); return; }
     if (event.contextId !== this.contextId) return;
     if (event.kind === 'conversation') {
       const message = event.data as ConversationMessage & { replyDraftId?: string };
@@ -747,6 +772,7 @@ export class TerminalApp {
       const data = event.data as { area?: string };
       if (data?.area === 'message-queue') void this.refreshQueue();
       else if (data?.area === 'approvals') void this.refreshApprovals();
+      else if (data?.area === 'tasks') void this.refreshTasks();
       else if (data?.area === 'contexts' || data?.area === 'configuration') void this.refreshModel();
     } else if (event.kind === 'error') { const data = event.data as { code?: string; retryable?: boolean }; this.failure(String(data?.code ?? 'model_execution_failed'), event.runId, data?.retryable); this.status('运行发生错误'); }
   }
