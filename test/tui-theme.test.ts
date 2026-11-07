@@ -78,6 +78,19 @@ test('missing model is reported and a send is intercepted locally with guidance'
   } finally { await core.close(); await removeTemp(directory); }
 });
 
+test('a provider profile without stored login is reported before sending', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'arona-no-auth-'));
+  const core = await Core.open({ dataDir: directory, memoryEnabled: false });
+  try {
+    const model = core.providerRegistry.getModels('openai-codex')[0]!;
+    core.configure('model', { id: 'codex', name: 'Codex', providerId: 'openai-codex', modelId: model.id });
+    await core.switchModel('main', 'codex');
+    const state = await core.modelState('main');
+    assert.equal(state.unavailable, 'model_credentials_unavailable');
+    assert.equal(state.providerId, 'openai-codex');
+  } finally { await core.close(); await removeTemp(directory); }
+});
+
 test('model state reports effective thinking and Shift+Tab cycles supported levels', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'arona-model-state-'));
   const core = await Core.open({ dataDir: directory, memoryEnabled: false });
@@ -86,7 +99,7 @@ test('model state reports effective thinking and Shift+Tab cycles supported leve
     core.providerRegistry.setProvider(faux.provider);
     core.configure('model', { id: 'think', name: 'Thinker', providerId: 'fake', modelId: 'reasoner', defaultThinkingLevel: 'high' });
     await core.switchModel('main', 'think');
-    assert.deepEqual(await core.modelState('main'), { contextId: 'main', profileId: 'think', name: 'Thinker', modelId: 'reasoner', thinkingLevel: 'high', source: 'profile', unavailable: null, configuredProfiles: 1 });
+    assert.deepEqual(await core.modelState('main'), { contextId: 'main', profileId: 'think', name: 'Thinker', modelId: 'reasoner', thinkingLevel: 'high', source: 'profile', unavailable: null, configuredProfiles: 1, providerId: 'fake' });
     await core.switchModel('main', 'think', 'low');
     assert.equal((await core.modelState('main')).source, 'session');
     await core.switchModel('main', 'think', null);

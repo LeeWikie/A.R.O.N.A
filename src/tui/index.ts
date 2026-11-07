@@ -70,7 +70,7 @@ export const tuiCommands: readonly TuiCommand[] = [
   { name: 'schedules', description: '定时任务' },
   { name: 'tools', description: '展开或折叠工具活动' },
   { name: 'attach', description: '附件', capability: 'attachments' },
-  { name: 'login', description: '供应商登录', aliases: ['auth'], capability: 'provider-auth' },
+  { name: 'login', description: '供应商登录', usage: '/login [供应商]', aliases: ['auth'], capability: 'provider-auth' },
   { name: 'mcp', description: 'MCP 连接' },
   { name: 'memory', description: '记忆' },
   { name: 'editor', description: '外部编辑器（Ctrl+G）' },
@@ -1003,7 +1003,7 @@ export class TerminalApp {
         case 'schedules': await this.schedules(); return;
         case 'tools': await this.toolActivity(); return;
         case 'attach': await this.attachments(); return;
-        case 'login': await this.providerAuth(); return;
+        case 'login': await this.providerAuth(arg || undefined); return;
         case 'mcp': await this.mcp(); return;
         case 'memory': await this.memory(); return;
         case 'editor': await this.externalEditor(); return;
@@ -1463,9 +1463,11 @@ export class TerminalApp {
     try { await this.decideApproval(approval); } catch (error) { if (!this.stopped) this.note(`审批未完成：${approvalError(error)}`); }
     finally { this.approvalOpen = undefined; }
   }
-  private async providerAuth() {
+  private async providerAuth(requested?: string) {
     const { providers } = await this.request<{ providers: Array<{ id: string; name: string; methods: Array<{ type: 'api_key' | 'oauth'; name: string }> }> }>('/auth/providers');
-    const id = await this.choose('供应商登录', providers.map(provider => ({ value: provider.id, label: provider.name, description: provider.id }))); if (!id) return;
+    const match = requested ? providers.find(provider => provider.id === requested || provider.name.toLowerCase() === requested.toLowerCase()) : undefined;
+    if (requested && !match) this.note(`没有名为 ${label(requested)} 的供应商，请从列表中选择。`);
+    const id = match?.id ?? await this.choose('供应商登录', providers.map(provider => ({ value: provider.id, label: provider.name, description: provider.id }))); if (!id) return;
     const provider = providers.find(x => x.id === id)!;
     const status = await this.request<{ configured: boolean; source?: string }>(`/auth/status/${routeId(id)}`);
     const actions: SelectItem[] = provider.methods.map(method => ({ value: method.type, label: method.name }));
