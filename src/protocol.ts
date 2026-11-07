@@ -31,5 +31,5 @@ export interface ConversationPage {messages:ConversationMessage[];nextCursor:str
 export interface TuiSnapshot {
   protocolVersion:1;instanceId:string;storageId:string;watermark:number;selectedContextId:string;
   contexts:import('./runtime-store.js').ContextRecord[];tasks:unknown[];approvals:unknown[];conversation:ConversationPage;
-  runs:import('./domain.js').RunRecord[];models:unknown[];workspaces:unknown[];notifications:unknown[];drafts:unknown[];queuedMessages?:unknown[];toolActivity?:unknown[];capacity?:import('./context-policy.js').ContextCapacity|null;
+  runs:import('./domain.js').RunRecord[];models:unknown[];workspaces:unknown[];notifications:unknown[];drafts:unknown[];queuedMessages?:unknown[];toolActivity?:unknown[];thinking?:Array<{runId:string;createdAt:string;text:string}>;capacity?:import('./context-policy.js').ContextCapacity|null;
 }

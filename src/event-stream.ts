@@ -30,6 +30,16 @@ export function projectEvent(core: Core, event: RuntimeEvent): PublicEvent | und
     if (output) return { ...base, kind: 'conversation', data: committedMessage(core, output) };
   }
   if (event.kind.startsWith('reply.')) return { ...base, kind: event.kind, data };
+  // Provider-supplied reasoning text, shown as thinking blocks (Pi shows them by default). Encrypted or
+  // signed reasoning never reaches here: only plain reasoning-delta text, with secrets redacted.
+  if (event.kind === 'message_update' && data) {
+    const update = data.event as { type?: string; delta?: unknown; index?: unknown } | undefined;
+    if (update?.type === 'reasoning-delta' && typeof update.delta === 'string' && update.delta) {
+      const delta = redactPublicArgs(core, update.delta) as string;
+      return { ...base, kind: 'thinking', data: { messageId: String(data.id ?? ''), index: typeof update.index === 'number' ? update.index : 0, delta } };
+    }
+    return undefined;
+  }
   if (['agent_start', 'agent_end'].includes(event.kind)) return { ...base, kind: 'run', data: { state: event.kind === 'agent_start' ? 'running' : 'ended', ...(data && ['complete', 'aborted', 'error', 'suspended'].includes(String(data.reason)) ? { reason: data.reason } : {}) } };
   if(event.kind==='capacity_state')return {...base,kind:'capacity',data};
   if(event.kind==='public_tool')return {...base,kind:'tool',data};
@@ -79,6 +89,18 @@ export function conversationPage(core: Core, contextId: string, after?: string, 
 }
 function safeTask(task: TaskRecord) { const { toolGrants: _, mcpKeys: __, ...visible } = task; return visible; }
 function safeArgs(core:Core,value:unknown){return redactPublicArgs(core,value);}
+/** Thinking text per run for history reload, rebuilt from the same public reasoning-delta projection. */
+export function contextThinking(core: Core, contextId: string) {
+  const rows = core.store.db.prepare("SELECT seq,kind,context_id,run_id,task_id,data,created_at FROM runtime_events WHERE context_id=? AND kind='message_update' AND json_extract(data,'$.event.type')='reasoning-delta' ORDER BY seq").all(contextId);
+  const runs = new Map<string, { runId: string; createdAt: string; text: string }>();
+  for (const row of rows) {
+    const event = projectEvent(core, { seq: Number(row.seq), kind: String(row.kind), contextId: String(row.context_id), runId: row.run_id as string | null, taskId: row.task_id as string | null, data: JSON.parse(String(row.data)), createdAt: String(row.created_at) });
+    if (!event || event.kind !== 'thinking' || !event.runId) continue;
+    const entry = runs.get(event.runId) ?? { runId: event.runId, createdAt: event.createdAt, text: '' };
+    entry.text += (event.data as { delta: string }).delta; runs.set(event.runId, entry);
+  }
+  return [...runs.values()];
+}
 export function activeDrafts(core:Core,contextId:string){
   const drafts=new Map<string,{draftId:string;signalId:string;contextId:string;runId:string;text:string}>();
   const events=core.store.db.prepare("SELECT kind,data FROM runtime_events WHERE context_id=? AND kind LIKE 'reply.%' ORDER BY seq").all(contextId);
@@ -96,7 +118,7 @@ export function snapshot(core: Core, contextId = 'main'): TuiSnapshot {
   const watermark = core.runtime.eventHead();
   const approvals = publicApprovals(core);
   const runs = core.store.db.prepare('SELECT id FROM runs WHERE context_id=? ORDER BY created_at DESC LIMIT 100').all(contextId).map(row => core.store.getRun(String(row.id))!);
-  return { protocolVersion: 1, instanceId: core.instanceId, storageId: core.storageId, watermark, selectedContextId: contextId,queuedMessages:core.queuedMessages(contextId),toolActivity:toolActivity(core,contextId),capacity:core.contextPolicy.view(contextId),drafts:activeDrafts(core,contextId), contexts: core.runtime.contexts(), tasks: core.runtime.tasks().map(safeTask), approvals, conversation: conversationPage(core, contextId), runs, models: core.models.list(), workspaces: core.capabilities.roots(), notifications: core.runtime.pendingNotifications() };
+  return { protocolVersion: 1, instanceId: core.instanceId, storageId: core.storageId, watermark, selectedContextId: contextId,queuedMessages:core.queuedMessages(contextId),toolActivity:toolActivity(core,contextId),capacity:core.contextPolicy.view(contextId),drafts:activeDrafts(core,contextId),thinking:contextThinking(core,contextId), contexts: core.runtime.contexts(), tasks: core.runtime.tasks().map(safeTask), approvals, conversation: conversationPage(core, contextId), runs, models: core.models.list(), workspaces: core.capabilities.roots(), notifications: core.runtime.pendingNotifications() };
 }
 export function publicEventPage(core: Core, after: number, contextId?: string, limit = 500) {
   if (after > core.runtime.eventHead()) throw new AppError('event_cursor_out_of_range', 409);

@@ -24,6 +24,7 @@ import { filterAndSortSessions, type SessionInfo } from './upstream/session-sele
 import { protocolHandshakeSchema } from '../protocol.js';
 import { findFd } from '../tools/fd.js';
 import { colorEnabled, detectAppearance, plainTheme, Theme } from './upstream/theme.js';
+import { runShell, shellResultText, SHELL_MAX_LINES } from './shell.js';
 
 const identity = (s: string) => s;
 // Module-level theme so free functions and components share one palette; set per app instance.
@@ -83,7 +84,7 @@ export const tuiCommands: readonly TuiCommand[] = [
 ];
 function commandHelp() {
   return ['可用命令：', ...tuiCommands.map(command => `  ${command.usage ?? `/${command.name}`}  ${command.description}${command.aliases?.length ? `（别名 ${command.aliases.map(alias => `/${alias}`).join(' ')}）` : ''}`),
-    '快捷键：Esc 停止当前回复 · Ctrl+C 清空输入／停止运行／连按两次退出 · Ctrl+D 空输入时退出 · Ctrl+O 展开或折叠工具 · Ctrl+Z 挂起到后台（fg 恢复） · Ctrl+L 选择模型 · Ctrl+P 切换到下一个模型 · Shift+Tab 切换思考等级 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
+    '!命令 在本机执行并把结果带入下一条消息 · !!命令 执行但不带入 · 快捷键：Esc 停止当前回复或命令 · Ctrl+C 清空输入／停止运行／连按两次退出 · Ctrl+D 空输入时退出 · Ctrl+O 展开或折叠工具 · Ctrl+T 展开或折叠思考 · Ctrl+Z 挂起到后台（fg 恢复） · Ctrl+L 选择模型 · Ctrl+P 切换到下一个模型 · Shift+Tab 切换思考等级 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
 }
 const supportedLevels = (levels: readonly string[]) => levels.filter(level => ['off', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level));
 type SavedProfile = { id: string; name: string; modelId: string; defaultThinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' } & ({ providerId: string } | { protocol: 'chat-completions' | 'responses' | 'messages'; baseURL: string; apiKeyEnv: string; authHeader: 'api-key' | 'bearer'; thinking: Record<string, Record<string, unknown>> });
@@ -254,6 +255,45 @@ function describeFields(heading: string, value: unknown): string[] {
   return [`${heading}：`, ...entries.map(([key, item]) => `  ${key}：${show(item)}`)];
 }
 
+/** `!command` output card after Pi BashExecutionComponent: last 20 lines folded, Ctrl+O shows all. */
+class ShellCard extends Container {
+  private lines: string[] = [''];
+  private state: 'running' | 'done' | 'failed' | 'cancelled' = 'running';
+  private exitCode?: number;
+  private expanded = false;
+  constructor(private readonly command: string, private readonly shared: boolean) { super(); this.rebuild(); }
+  append(text: string) { const parts = text.split('\n'); this.lines[this.lines.length - 1] = (this.lines.at(-1) ?? '') + (parts[0] ?? ''); this.lines.push(...parts.slice(1)); if (this.lines.length > SHELL_MAX_LINES) this.lines = this.lines.slice(-SHELL_MAX_LINES); this.rebuild(); }
+  finish(result: { exitCode: number | undefined; cancelled: boolean }) { this.exitCode = result.exitCode; this.state = result.cancelled ? 'cancelled' : result.exitCode === 0 ? 'done' : 'failed'; this.rebuild(); }
+  isExpanded() { return this.expanded; }
+  setExpanded(value: boolean) { if (this.expanded !== value) { this.expanded = value; this.rebuild(); } }
+  private rebuild() {
+    const tone = this.shared ? 'accent' : 'dim';
+    this.clear(); this.addChild(new Spacer(1));
+    this.addChild(new Text(theme.fg(tone, theme.bold(`$ ${safeTerminalText(this.command)}`)) + theme.fg('dim', this.shared ? '  · 结果会带入下一条消息' : '  · 不带入对话'), 1, 0));
+    const body = this.lines.join('\n').replace(/\n$/, '').split('\n');
+    const shown = this.expanded ? body : body.slice(-20);
+    if (body.length > shown.length) this.addChild(new Text(theme.fg('dim', `…前 ${body.length - shown.length} 行已折叠（Ctrl+O 展开）`), 1, 0));
+    if (shown.some(line => line)) this.addChild(new Text(theme.fg('muted', safeTerminalText(shown.join('\n'))), 1, 0));
+    const status = this.state === 'running' ? theme.fg('muted', '运行中… Esc 取消') : this.state === 'done' ? theme.fg('success', '完成') : this.state === 'cancelled' ? theme.fg('warning', '已取消') : theme.fg('error', `退出码 ${this.exitCode ?? '?'}`);
+    this.addChild(new Text(status, 1, 0));
+  }
+}
+
+/** Provider thinking for one run, styled like Pi (thinkingText, italic); Ctrl+T hides it behind a label. */
+class ThinkingBlock extends Container {
+  text = '';
+  private readonly body = new Markdown('', 1, 0, markdownTheme, { color: value => theme.fg('thinkingText', value), italic: true });
+  private readonly placeholder = new Text('', 1, 0);
+  constructor(private hidden: boolean) { super(); this.rebuild(); }
+  append(delta: string) { this.text += delta; this.body.setText(safeTerminalText(this.text.trim())); }
+  setHidden(hidden: boolean) { if (this.hidden !== hidden) { this.hidden = hidden; this.rebuild(); } }
+  private rebuild() {
+    this.clear(); this.addChild(new Spacer(1));
+    if (this.hidden) { this.placeholder.setText(theme.italic(theme.fg('thinkingText', '思考中…（Ctrl+T 展开）'))); this.addChild(this.placeholder); }
+    else this.addChild(this.body);
+  }
+}
+
 class Modal implements Component {
   focused = false;
   capturesViewportInput = true;
@@ -295,8 +335,8 @@ function addUsage(total: UsageTotals, usage: Record<string, unknown>) {
 /** ↑input ↓output R/W cache, as in Pi's footer; unreported cache fields are omitted, not shown as zero. */
 function usageLine(total: UsageTotals) {
   const parts = [`↑${formatTokens(total.input)}`, `↓${formatTokens(total.output)}`];
-  if (total.cacheRead !== null) parts.push(`R${formatTokens(total.cacheRead)}`);
-  if (total.cacheWrite !== null) parts.push(`W${formatTokens(total.cacheWrite)}`);
+  if (total.cacheRead) parts.push(`R${formatTokens(total.cacheRead)}`);
+  if (total.cacheWrite) parts.push(`W${formatTokens(total.cacheWrite)}`);
   return parts.join(' ');
 }
 const failureTitles: Record<string, string> = {
@@ -641,10 +681,12 @@ export class TerminalApp {
       if (matchesKey(data, Key.shift('tab')) && !this.editor.isShowingAutocomplete()) { void this.cycleThinking().catch(error => { if (!this.stopped) this.note(`切换失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('o'))) { this.toggleAllTools(); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('z'))) { this.suspend(); return { consume: true }; }
+      if (matchesKey(data, Key.ctrl('t'))) { this.toggleThinking(); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('p'))) { void this.cycleModel().catch(error => { if (!this.stopped) this.note(`切换失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('l'))) { void this.models().catch(error => { if (!this.stopped) this.note(`操作失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       // Esc stops the running reply (Pi's app.interrupt); with completions open it belongs to the editor.
       if (matchesKey(data, Key.escape) && this.compactController) { this.compactController.abort(); return { consume: true }; }
+      if (matchesKey(data, Key.escape) && this.shellController && !this.editor.isShowingAutocomplete()) { this.shellController.abort(); return { consume: true }; }
       if (matchesKey(data, Key.escape) && !this.editor.isShowingAutocomplete() && this.currentRunId && this.isMainContext) { this.stopForeground(); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('d')) && !this.editor.getText()) { void this.stop(); return { consume: true }; }
       if (!matchesKey(data, Key.ctrl('c'))) return undefined;
@@ -665,7 +707,12 @@ export class TerminalApp {
     const supported = (name: string) => { const command = tuiCommands.find(entry => entry.name === name); return !command?.capability || this.capabilities.has(command.capability); };
     editor.setAutocompleteProvider(new SafeAutocomplete(new CombinedAutocompleteProvider(commands, this.completionBase, this.completionFdPath), this.completionBase, supported));
     editor.onSubmit = text => { void this.submit(text).finally(() => { if (this.approvalDeferred) void this.presentApproval(); }); };
-    editor.onChange = text => { if (!text.trim() && this.approvalDeferred) void this.presentApproval(); };
+    editor.onChange = text => {
+      if (!text.trim() && this.approvalDeferred) void this.presentApproval();
+      // Pi colours the editor border in bash mode so a leading ! is never sent by surprise.
+      const bash = text.trimStart().startsWith('!');
+      if (bash !== this.bashMode) { this.bashMode = bash; editor.borderColor = bash ? (value => theme.fg(text.trimStart().startsWith('!!') ? 'dim' : 'warning', value)) : (value => theme.thinking(this.model?.thinkingLevel ?? 'off', value)); this.ui.requestRender(); }
+    };
     return editor;
   }
   private mountEditor() {
@@ -705,7 +752,7 @@ export class TerminalApp {
     const attachmentCount = this.pendingAttachments.get(this.contextId)?.length ?? 0;
     const tone = /错误|失败|断开/.test(text) ? 'error' : /处理中|连接中|重连/.test(text) ? 'warning' : 'success';
     const model = this.model ? `${label(this.model.name)} • ${this.model.thinkingLevel ? label(this.model.thinkingLevel) : '思考：供应商默认'}` : '';
-    const parts = [theme.fg(tone, label(text)), this.capacityText, this.usageText && theme.fg('dim', this.usageText), this.queueCount ? theme.fg('warning', `队列 ${this.queueCount}`) : '', attachmentCount ? theme.fg('dim', `待发送附件 ${attachmentCount}`) : '', this.pendingApprovals.length ? theme.fg('warning', `待审批 ${this.pendingApprovals.length}`) : '', this.activeTasks ? theme.fg('muted', `后台任务 ${this.activeTasks}`) : '', model && theme.thinking(this.model?.thinkingLevel ?? 'off', model)].filter(Boolean);
+    const parts = [theme.fg(tone, label(text)), this.capacityText, this.usageText && theme.fg('dim', this.usageText), this.queueCount ? theme.fg('warning', `队列 ${this.queueCount}`) : '', attachmentCount ? theme.fg('dim', `待发送附件 ${attachmentCount}`) : '', this.pendingApprovals.length ? theme.fg('warning', `待审批 ${this.pendingApprovals.length}`) : '', this.activeTasks ? theme.fg('muted', `后台任务 ${this.activeTasks}`) : '', this.sharedShell.get(this.contextId)?.length ? theme.fg('accent', `待带入命令结果 ${this.sharedShell.get(this.contextId)!.length}`) : '', model && theme.thinking(this.model?.thinkingLevel ?? 'off', model)].filter(Boolean);
     this.footer.setText(`${parts.join(theme.fg('dim', '  ·  '))}\n${theme.fg('dim', '/help 命令  /menu 管理  /quit 退出  ·  Shift+Tab 思考等级  ·  PageUp/PageDown 浏览')}`);
     this.ui.requestRender();
   }
@@ -770,7 +817,7 @@ export class TerminalApp {
       this.pendingApprovals = ((snapshot.approvals ?? []) as ApprovalRecord[]).filter(row => row.status === 'pending');
       this.currentRunId = snapshot.runs?.find(run => run.status === 'running')?.id; if (this.currentRunId) this.runStartedAt = Date.parse(snapshot.runs!.find(run => run.id === this.currentRunId)!.createdAt) || Date.now();
       this.updateWorking();
-      this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.visibleAttachments.delete(context); this.lastAssistant.delete(context); this.transcript.clear();
+      this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.thinkingBlocks.clear(); this.visibleAttachments.delete(context); this.lastAssistant.delete(context); this.transcript.clear();
       if (discardedAttachments) this.note('核心存储已变化，之前待发送的附件已清除，请重新选择。');
       let page: ConversationPage = snapshot.conversation; const history: string[] = []; const messages: ConversationMessage[] = [];
       for (;;) {
@@ -791,8 +838,13 @@ export class TerminalApp {
         const tool = item as ToolActivity;
         if (tool.contextId === context && typeof tool.toolCallId === 'string' && tool.toolCallId && typeof tool.toolName === 'string' && ['running', 'finished', 'failed', 'denied'].includes(tool.state)) timeline.push({ at: tool.startedAt ?? '', order: timeline.length, tool });
       }
+      const thoughts = new Map((snapshot.thinking ?? []).map(item => [item.runId, item]));
       timeline.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order);
-      for (const entry of timeline) { if (entry.message) this.message(entry.message); else if (entry.tool) this.updateTool(entry.tool); }
+      for (const entry of timeline) {
+        if (entry.message?.role === 'assistant' && entry.message.runId && thoughts.has(entry.message.runId)) { const item = thoughts.get(entry.message.runId)!; thoughts.delete(item.runId); this.thinking(item.runId, item.text); }
+        if (entry.message) this.message(entry.message); else if (entry.tool) this.updateTool(entry.tool);
+      }
+      for (const item of thoughts.values()) this.thinking(item.runId, item.text);
       for (const draft of snapshot.drafts ?? []) {
         if (!draft || typeof draft !== 'object') throw new AppError('invalid_reply_event');
         const restored = draft as { runId?: unknown; text?: unknown };
@@ -843,6 +895,7 @@ export class TerminalApp {
       this.message(message);
     }
     else if (event.kind.startsWith('reply.')) this.replyEvent(event);
+    else if (event.kind === 'thinking') { const data = event.data as { delta?: unknown }; if (typeof data?.delta === 'string') this.thinking(event.runId, data.delta); }
     else if (event.kind === 'run') {
       const data = event.data as { state?: string; reason?: string };
       if (data.state === 'running' && event.runId) { this.currentRunId = event.runId; this.runStartedAt = Date.now(); }
@@ -966,7 +1019,7 @@ export class TerminalApp {
     this.contextId = contextId;
     this.editor = this.editors.get(contextId) ?? this.createEditor(); this.editors.set(contextId, this.editor);
     this.overlays = createOverlayHandlers(this.ui, this.editor); this.mountEditor();
-    this.currentRunId = undefined; this.contextRole = undefined; this.contextName = ''; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.model = undefined; this.modelVersion++; this.usageTotal = emptyUsage(); this.usageVersion++; this.working?.stop(); this.working = undefined; this.workingSlot.clear(); this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.transcript.clear(); this.ui.resetTextSelection();
+    this.currentRunId = undefined; this.contextRole = undefined; this.contextName = ''; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.model = undefined; this.modelVersion++; this.usageTotal = emptyUsage(); this.usageVersion++; this.working?.stop(); this.working = undefined; this.workingSlot.clear(); this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.thinkingBlocks.clear(); this.shellCards.length = 0; this.transcript.clear(); this.ui.resetTextSelection();
     this.status('连接中'); void this.loadContext(this.generation);
   }
   private request<T>(route: string, init?: RequestInit) {
@@ -1024,6 +1077,44 @@ export class TerminalApp {
     this.ui.requestRender();
   }
   private lastCtrlC = 0;
+  private hideThinking = false;
+  private shellController?: AbortController;
+  private bashMode = false;
+  private readonly shellCards: ShellCard[] = [];
+  /** Results of `!` commands waiting to ride along with the next message (Pi: bash results join the context). */
+  private readonly sharedShell = new Map<string, string[]>();
+  /**
+   * `!cmd` runs in a local shell here and its result is attached to your next message; `!!cmd` runs
+   * without sharing (Pi semantics). It runs as you, in the directory the TUI started in, with no
+   * approval step: the same as typing it in your own shell, and not sandboxed.
+   */
+  private async shell(text: string) {
+    const shared = !text.startsWith('!!');
+    const command = (shared ? text.slice(1) : text.slice(2)).trim();
+    if (!command) return;
+    if (this.shellController) { this.note('已有命令在运行；Esc 取消后再试。'); this.editor.setText(text); return; }
+    this.editor.addToHistory(text);
+    const card = new ShellCard(command, shared); this.shellCards.push(card); this.transcript.addChild(card); this.ui.requestRender();
+    const context = this.contextId; const controller = new AbortController(); this.shellController = controller;
+    try {
+      const result = await runShell(command, { cwd: this.completionBase, signal: AbortSignal.any([controller.signal, this.lifetime.signal]), onChunk: chunk => { card.append(chunk); this.ui.requestRender(); } });
+      card.finish(result); this.ui.requestRender();
+      if (shared && !result.cancelled) { const rows = this.sharedShell.get(context) ?? []; rows.push(shellResultText(command, result)); this.sharedShell.set(context, rows); this.status(this.statusText); }
+    } finally { if (this.shellController === controller) this.shellController = undefined; }
+  }
+  private readonly thinkingBlocks = new Map<string, ThinkingBlock>();
+  private thinking(runId: string | null | undefined, delta: string) {
+    if (!runId || !delta) return;
+    let block = this.thinkingBlocks.get(runId);
+    if (!block) { block = new ThinkingBlock(this.hideThinking); this.thinkingBlocks.set(runId, block); this.transcript.addChild(block); }
+    block.append(delta); this.ui.requestRender();
+  }
+  /** Ctrl+T, as in Pi app.thinking.toggle: show or hide every thinking block. */
+  private toggleThinking() {
+    this.hideThinking = !this.hideThinking;
+    for (const block of this.thinkingBlocks.values()) block.setHidden(this.hideThinking);
+    this.note(this.hideThinking ? '已折叠思考内容（Ctrl+T 展开）。' : '已展开思考内容。');
+  }
   private streamLost = false;
   private coreChanged = false;
   /** Ctrl+Z, as in Pi: hand the terminal back to the shell; fg resumes. The core keeps running either way. */
@@ -1042,7 +1133,7 @@ export class TerminalApp {
   }
   /** Ctrl+O: expand every tool card if any is folded, otherwise fold them all (Pi app.tools.expand). */
   private toggleAllTools() {
-    const cards = [...this.toolCards.values()]; if (!cards.length) return;
+    const cards: Array<{ isExpanded(): boolean; setExpanded(value: boolean): void }> = [...this.toolCards.values(), ...this.shellCards]; if (!cards.length) return;
     const expand = cards.some(card => !card.isExpanded()); for (const card of cards) card.setExpanded(expand);
     this.ui.requestRender();
   }
@@ -1088,6 +1179,7 @@ export class TerminalApp {
     const staged = this.pendingAttachments.get(this.contextId) ?? [];
     if (!text.trim() && !staged.length) return;
     if (!staged.length && /^\/[a-z]/i.test(text.trim())) { await this.command(text.trim()); return; }
+    if (!staged.length && text.trimStart().startsWith('!') && !preset) { await this.shell(text.trimStart()); return; }
     if (!this.contextRole || !this.contextReady) { this.editor.setText(text); this.note('上下文尚未就绪，请等待连接。'); return; }
     if (this.contextRole !== 'main') { this.editor.setText(text); this.note('工作上下文为只读；请通过任务菜单发送补充。'); return; }
     if (this.model?.unavailable) { this.guidanceShown.add(this.contextId); await this.refreshModel(); if (this.model?.unavailable) { this.editor.setText(text); this.modelGuidance(); return; } }
@@ -1104,13 +1196,16 @@ export class TerminalApp {
       mode = choice;
     }
     const expectedRunId = mode === 'steer' ? observedRunId : undefined;
+    const pendingShell = this.sharedShell.get(context) ?? [];
+    const outgoing = pendingShell.length ? `${pendingShell.join('\n\n')}\n\n${text}`.slice(-64_000) : text;
     const previous = this.failedSubmission;
     const id = previous?.text === text && previous.context === context && previous.mode === mode && previous.expectedRunId === expectedRunId && JSON.stringify(previous.attachmentIds) === JSON.stringify(attachmentIds) ? previous.id : randomUUID();
     this.editor.disableSubmit = true;
     try {
-      const receipt = await this.write('/messages', { id, contextId: context, content: text, ...(attachmentIds.length ? { attachments: attachmentIds } : {}), ...(mode ? { mode } : {}), ...(expectedRunId ? { expectedRunId } : {}) }) as SignalRecord;
+      const receipt = await this.write('/messages', { id, contextId: context, content: outgoing, ...(attachmentIds.length ? { attachments: attachmentIds } : {}), ...(mode ? { mode } : {}), ...(expectedRunId ? { expectedRunId } : {}) }) as SignalRecord;
       if (receipt.status !== 'accepted' && receipt.status !== 'queued') throw new AppError(receipt.errorCode || 'message_not_accepted', 409);
       this.failedSubmission = undefined;
+      if (pendingShell.length) { this.sharedShell.delete(context); this.status(this.statusText); }
       if (attachmentIds.length) this.pendingAttachments.set(context, (this.pendingAttachments.get(context) ?? []).filter(item => !attachmentIds.includes(item.id)));
       if (context === this.contextId && !this.stopped) {
         this.editor.addToHistory(text);
