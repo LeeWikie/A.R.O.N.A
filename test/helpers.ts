@@ -1,4 +1,5 @@
 import { MastraLanguageModelV2Mock } from '@mastra/core/test-utils/llm-mock';
+import { createApp } from '../src/http.js';
 import type { Core } from '../src/core.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -70,4 +71,14 @@ export function scriptedModel(options: { gate?: Promise<void>; fail?: boolean; o
     },
   });
   return { model, calls: () => callCount };
+}
+
+export function authenticatedApp(core: Core) {
+  const app = createApp(core); const request = app.request.bind(app);
+  app.request = ((input: Parameters<typeof app.request>[0], init?: RequestInit) => {
+    const headers = new Headers(init?.headers); headers.set('Authorization', `Bearer ${core.controlToken}`);
+    if(String(input).startsWith('/assets')&&init?.method==='POST'&&!headers.has('X-ShittimChest-Storage-Id'))headers.set('X-ShittimChest-Storage-Id',core.storageId);
+    return request(input, { ...init, headers });
+  }) as typeof app.request;
+  return app;
 }

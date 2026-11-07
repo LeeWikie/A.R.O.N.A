@@ -36,6 +36,7 @@ Thumbs.db
 /MEMORY/
 /imports/
 /backups/
+/claude-code-sessions/
 *.log
 *.sqlite
 *.sqlite-wal

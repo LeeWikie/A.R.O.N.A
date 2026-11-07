@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "node --env-file-if-exists=.env --import tsx src/server.ts",
     "cli": "node --env-file-if-exists=.env --import tsx src/cli.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-licenses.mjs && node scripts/prepare-fd.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --expose-gc --import tsx --test --test-concurrency=1 test/*.test.ts",
     "test:live": "node --env-file-if-exists=.env --import tsx scripts/smoke.ts",
@@ -20,17 +20,47 @@
     "@ai-sdk/anthropic": "4.0.94",
     "@ai-sdk/openai": "4.0.106",
     "@ai-sdk/provider": "4.0.35",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
     "@hono/node-server": "2.1.5",
+    "@inquirer/password": "5.2.5",
     "@mastra/core": "1.81.0",
     "@mastra/libsql": "1.28.0",
+    "@mastra/mcp": "2.7.0",
     "@mastra/memory": "1.40.0",
+    "@mozilla/readability": "0.6.0",
     "croner": "10.0.1",
+    "eventsource-parser": "3.0.6",
+    "file-type": "21.0.0",
     "hono": "4.13.14",
+    "ipaddr.js": "2.4.0",
+    "linkedom": "0.18.12",
+    "marked": "15.0.12",
+    "proper-lockfile": "4.1.2",
+    "turndown": "7.2.0",
+    "yauzl": "3.2.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@lydell/node-pty": "1.2.0-beta.15",
     "@types/node": "24.19.2",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/turndown": "5.0.5",
+    "@types/yauzl": "2.10.3",
+    "@xterm/headless": "5.5.0",
+    "chalk": "6.0.0",
     "tsx": "4.23.15",
-    "typescript": "5.9.3"
-  }
+    "typescript": "5.9.3",
+    "vitest": "5.0.5"
+  },
+  "bin": {
+    "shittimchest": "dist/cli.js",
+    "arona": "dist/cli.js",
+    "shittimchest-core": "dist/server.js"
+  },
+  "files": [
+    "dist/**",
+    "README.md",
+    ".env.example"
+  ]
 }

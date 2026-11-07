@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { Client } from '../src/client.js';
+import { Client, OutputCursor } from '../src/client.js';
 import type { RunRecord, SignalRecord } from '../src/domain.js';
 import type { Schedule, Occurrence } from '../src/schedules.js';
 import { removeTemp, until } from './helpers.js';
@@ -20,14 +20,15 @@ async function worker(directory: string) {
   child.stderr!.on('data', chunk => { stderr += String(chunk); });
   let calls = 0;
   let port: number | undefined;
+  let token: string | undefined;
   child.on('message', (message) => {
-    const value = message as { type: string; port?: number };
-    if (value.type === 'ready') port = value.port;
+    const value = message as { type: string; port?: number; token?: string };
+    if (value.type === 'ready') { port = value.port; token = value.token; }
     if (value.type === 'model-call') calls++;
   });
   await until(() => ({ port, exited: child.exitCode }), value => !!value.port || value.exited !== null);
   assert.ok(port, `worker failed: ${stderr}`);
-  return { child, client: new Client(`http://127.0.0.1:${port}`), calls: () => calls };
+  return { child, client: new Client(`http://127.0.0.1:${port}`, token, 1), calls: () => calls };
 }
 
 async function stop(child: ReturnType<typeof fork>, hard = false) {
@@ -58,6 +59,10 @@ test('independent CLI disconnect/reconnect, full history and crash interruption 
     let shown = '';
     replay.stdout.on('data', chunk => { shown += String(chunk); });
     await until(() => shown, value => value.includes('Synthetic reply'));
+    // Display and the following durable checkpoint are separate operations; a hard
+    // process kill between them may replay a delivered record (at-least-once).
+    const replayCursor=new OutputCursor(path.join(directory,'client'),running.client.baseURL,'main','message');
+    await until(()=>replayCursor.read(),value=>value>0);
     await stop(replay);
     const resumed = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'watch'], {
       cwd: root, env: { ...process.env, ARONA_DATA_DIR: directory, ARONA_CORE_URL: running.client.baseURL }, stdio: 'pipe',

@@ -28,6 +28,7 @@ export class Store {
         tool_call_id TEXT NOT NULL, created_at TEXT NOT NULL,
         UNIQUE(run_id, tool_call_id)
       );
+      CREATE TABLE IF NOT EXISTS message_intents (seq INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT NOT NULL UNIQUE, revision INTEGER NOT NULL DEFAULT 1, replaces TEXT, replaced_by TEXT);
       CREATE INDEX IF NOT EXISTS outputs_context ON outputs(context_id, seq);
       CREATE INDEX IF NOT EXISTS signals_run ON signals(run_id);
     `);
@@ -37,7 +38,7 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare("UPDATE runs SET status='interrupted', error_code='process_interrupted', finished_at=? WHERE status='running'").run(now());
-      this.db.exec("UPDATE signals SET status='interrupted', error_code='process_interrupted' WHERE status='received' OR (status='accepted' AND run_id IN (SELECT id FROM runs WHERE status='interrupted'))");
+      this.db.exec("UPDATE signals SET status='interrupted', error_code='process_interrupted' WHERE status IN ('received','queued') OR (status='accepted' AND run_id IN (SELECT id FROM runs WHERE status='interrupted'))");
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -45,6 +46,11 @@ export class Store {
     }
   }
 
+  reopenNotification(id:string){
+    const record=this.getSignal(id);if(record?.source!=='task-result'||record.type!=='external-event')throw new AppError('not_a_notification');
+    this.db.prepare("UPDATE signals SET status='received',error_code=NULL WHERE id=? AND status IN ('rejected','interrupted','accepted')").run(id);
+  }
+  reopenUnadmitted(id:string){this.db.prepare("UPDATE signals SET status='received',error_code=NULL WHERE id=? AND native_id IS NULL AND run_id IS NULL AND status='interrupted'").run(id);}
   receive(input: SignalInput): { record: SignalRecord; fresh: boolean } {
     const body = JSON.stringify(input);
     const existing = this.db.prepare('SELECT body FROM signals WHERE id=?').get(input.id);
@@ -56,6 +62,13 @@ export class Store {
     return { record: this.getSignal(input.id)!, fresh: true };
   }
 
+  queue(id:string,nativeId:string,runId:string) {
+    this.db.prepare("UPDATE signals SET status='queued',native_id=?,run_id=?,action=NULL WHERE id=? AND status='received'").run(nativeId,runId,id);
+  }
+  cancelQueued(id:string,status:'cancelled'|'interrupted'='cancelled') {
+    this.db.prepare("UPDATE signals SET status=?,error_code=? WHERE id=? AND status='queued'").run(status,status==='interrupted'?'process_interrupted':null,id);
+    this.db.prepare('UPDATE message_intents SET revision=revision+1 WHERE signal_id=?').run(id);
+  }
   accept(id: string, nativeId: string, runId: string, action: 'wake' | 'deliver', contextId: string) {
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -122,6 +135,10 @@ export class Store {
     }
     const previous = this.db.prepare('SELECT * FROM outputs WHERE run_id=? AND tool_call_id=?').get(input.runId, input.toolCallId);
     if (previous) return this.output(previous);
+    if(input.kind==='message'&&ids.every(id=>this.getSignal(id)?.source==='task-result')){
+      const delivered=ids.map(id=>this.outputsForSignal(id).find(output=>output.kind==='message'));
+      if(delivered.every(Boolean))return delivered[0]!;
+    }
     const result = this.db.prepare(`INSERT INTO outputs(id,kind,context_id,run_id,signal_ids,title,content,tool_call_id,created_at)
       VALUES(?,?,?,?,?,?,?,?,?)`).run(randomUUID(), input.kind, destination!, input.runId,
       JSON.stringify(ids), input.title ?? null, input.content, input.toolCallId, now());

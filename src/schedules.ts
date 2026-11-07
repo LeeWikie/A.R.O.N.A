@@ -18,10 +18,10 @@ const fields = {
   timing: timingSchema,
   timezone: z.string().min(1).max(128),
   contextId: contextIdSchema,
-  output: z.object({ kind: z.enum(['message', 'artifact', 'both']), contextId: contextIdSchema.optional() }).strict(),
+  output: z.object({ kind: z.enum(['message', 'artifact', 'both', 'none']), contextId: contextIdSchema.optional() }).strict(),
 };
 export const createScheduleSchema = z.object({
-  ...fields, timezone: fields.timezone.optional(), contextId: fields.contextId.default('main'), output: fields.output.optional(),
+  ...fields, version: z.literal(2).optional(), timezone: fields.timezone.optional(), contextId: fields.contextId.default('main'), output: fields.output.optional(),
 }).strict();
 export const updateScheduleSchema = z.object(fields).partial().extend({
   revision: z.number().int().positive(),
@@ -30,14 +30,14 @@ export const updateScheduleSchema = z.object(fields).partial().extend({
 export type Timing = z.infer<typeof timingSchema>;
 export type ScheduleStatus = 'active' | 'paused' | 'cancelled' | 'exhausted' | 'expired';
 export interface Schedule {
-  id: string; name: string; task: string; timing: Timing; timezone: string; contextId: string;
-  output: { kind: 'message' | 'artifact' | 'both'; contextId: string };
+  version?: 2; id: string; name: string; task: string; timing: Timing; timezone: string; contextId: string;
+  output: { kind: 'message' | 'artifact' | 'both' | 'none'; contextId: string };
   status: ScheduleStatus; revision: number; nextFireAt: string | null; createdAt: string; updatedAt: string;
 }
 export interface Occurrence {
   id: string; scheduleId: string; signalId: string; scheduledAt: string; kind: 'automatic' | 'manual';
-  snapshot: Schedule; dispatchStatus: 'pending' | 'accepted' | 'failed' | 'interrupted'; errorCode: string | null;
-  report: { status: 'pending' | 'succeeded' | 'failed' | 'unreported' | 'interrupted'; summary: string | null };
+  snapshot: Schedule; dispatchStatus: 'pending' | 'queued' | 'accepted' | 'failed' | 'interrupted'; errorCode: string | null;
+  report: { status: 'pending' | 'succeeded' | 'failed' | 'unreported' | 'interrupted' | 'blocked' | 'cancelled'; summary: string | null };
   signal?: SignalRecord; run: ReturnType<Store['getRun']> | null; outputs: OutputRecord[];
 }
 export interface SchedulerClock {
@@ -161,7 +161,7 @@ export class Schedules {
       if (next === null) throw new AppError('schedule_has_no_future_time');
       const stamp = new Date(now).toISOString();
       const schedule: Schedule = { ...input, id: randomUUID(), timezone,
-        output: { kind: input.output?.kind ?? 'both', contextId: input.output?.contextId ?? input.contextId },
+        output: { kind: input.output?.kind ?? (input.version === 2 ? 'none' : 'both'), contextId: input.output?.contextId ?? input.contextId },
         status: 'active', revision: 1, nextFireAt: new Date(next).toISOString(), createdAt: stamp, updatedAt: stamp };
       this.save(schedule);
       return schedule;
@@ -233,7 +233,7 @@ export class Schedules {
         const signal = await this.dispatch(occurrence);
         const accepted = signal.status === 'accepted';
         this.db.prepare('UPDATE schedule_occurrences SET dispatch_status=?,error_code=? WHERE id=? AND dispatch_status=\'pending\'')
-          .run(accepted ? 'accepted' : 'failed', signal.errorCode, id);
+          .run(accepted ? 'accepted' : signal.status === 'received' ? 'queued' : 'failed', signal.errorCode, id);
       } catch (error) {
         this.db.prepare("UPDATE schedule_occurrences SET dispatch_status='failed',error_code=? WHERE id=? AND dispatch_status='pending'")
           .run(error instanceof AppError ? error.code : 'signal_dispatch_failed', id);
@@ -290,7 +290,11 @@ export class Schedules {
     const signal = this.store.getSignal(row.signal_id as string);
     const run = signal?.runId ? this.store.getRun(signal.runId) ?? null : null;
     let status = row.report_status as Occurrence['report']['status'];
-    if (status === 'pending') {
+    const snapshot=JSON.parse(row.snapshot as string) as Schedule;
+    const taskRow=snapshot.version===2?this.db.prepare("SELECT body FROM tasks WHERE json_extract(body,'$.occurrenceId')=? ORDER BY rowid DESC LIMIT 1").get(id):undefined;
+    const task=taskRow?JSON.parse(taskRow.body as string) as {status:string}:undefined;
+    if(task)status=['succeeded','failed','blocked','cancelled','interrupted','unreported'].includes(task.status)?task.status as typeof status:'pending';
+    if (status === 'pending'&&!task) {
       if (row.dispatch_status === 'interrupted' || run?.status === 'interrupted') status = 'interrupted';
       else if (row.dispatch_status === 'failed' || (run && run.status !== 'running')) status = 'unreported';
     }
@@ -298,7 +302,7 @@ export class Schedules {
       id: row.id as string, scheduleId: row.schedule_id as string, signalId: row.signal_id as string,
       scheduledAt: new Date(row.scheduled_at as number).toISOString(), kind: row.kind as Occurrence['kind'],
       snapshot: JSON.parse(row.snapshot as string) as Schedule,
-      dispatchStatus: row.dispatch_status as Occurrence['dispatchStatus'], errorCode: row.error_code as string | null,
+      dispatchStatus: signal?.status === 'accepted' && row.dispatch_status === 'queued' ? 'accepted' : row.dispatch_status as Occurrence['dispatchStatus'], errorCode: row.error_code as string | null,
       report: { status, summary: row.summary as string | null }, signal, run,
       outputs: this.store.outputsForSignal(row.signal_id as string),
     };
@@ -307,6 +311,17 @@ export class Schedules {
     this.get(id);
     return this.db.prepare('SELECT id FROM schedule_occurrences WHERE schedule_id=? ORDER BY scheduled_at DESC,id DESC LIMIT ? OFFSET ?')
       .all(id, limit, offset).map(row => this.occurrence(row.id as string));
+  }
+
+  reportTask(id: string, taskId: string, runId: string, status: 'succeeded' | 'failed' | 'interrupted' | 'unreported' | 'blocked' | 'cancelled', summary: string, key: string) {
+    return this.operation(key, ['task-report', id, taskId, runId, status, summary], () => {
+      const row = this.db.prepare('SELECT body FROM tasks WHERE id=?').get(taskId);
+      const task = row && JSON.parse(row.body as string) as { occurrenceId: string; runIds: string[];status:string };
+      const occurrence = this.occurrence(id);
+      if (!task || task.occurrenceId !== id || task.runIds.at(-1)!==runId || !['succeeded','failed','interrupted'].includes(this.store.getRun(runId)?.status??'') || (status==='succeeded'&&task.status!=='succeeded')) throw new AppError('occurrence_not_in_active_run', 403);
+      this.db.prepare('UPDATE schedule_occurrences SET report_status=?,summary=? WHERE id=?').run(status, summary, id);
+      return { id: occurrence.id, status, summary, saved: true };
+    });
   }
   report(id: string, runId: string, status: 'succeeded' | 'failed', summary: string, key: string) {
     return this.operation(key, ['report', id, status, summary], () => {

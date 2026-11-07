@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Core } from '../src/core.js';
-import { createApp } from '../src/http.js';
+import { authenticatedApp as createApp } from './helpers.js';
 import { finished, scriptedModel, until, removeTemp } from './helpers.js';
 
 test('native Signals merge active inputs and publish separate destinations', async () => {

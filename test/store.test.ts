@@ -46,7 +46,7 @@ test('receipt idempotency, output boundaries, cursors and interruption survive r
 
 test('configuration validates explicit protocols without exposing supplied secrets', () => {
   const env = { ARONA_MODEL_PROTOCOL: 'responses', ARONA_MODEL_BASE_URL: 'http://127.0.0.1:9000/v1', ARONA_MODEL_ID: 'fixture-model', ARONA_MODEL_API_KEY: 'fixture-secret' };
-  assert.equal(readConfig(env).model.protocol, 'responses');
+  assert.equal(readConfig(env).model!.protocol, 'responses');
   for (const bad of [{ ARONA_MODEL_PROTOCOL: 'automatic' }, { ARONA_PORT: 'abc' }, { ARONA_MODEL_BASE_URL: 'https://name:fixture-secret@example.invalid' }, { ARONA_MODEL_ID: '' }]) {
     assert.throws(() => readConfig({ ...env, ...bad }), (error: Error) => !error.message.includes('fixture-secret'));
   }

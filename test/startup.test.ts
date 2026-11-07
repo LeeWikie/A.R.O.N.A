@@ -1,0 +1,51 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {createServer} from 'node:net';
+import {once} from 'node:events';
+import {ensureCore,coreLocation} from '../src/startup.js';
+import {until,removeTemp} from './helpers.js';
+
+function environment(directory:string,port:number):NodeJS.ProcessEnv{
+ const env:NodeJS.ProcessEnv={};for(const key of ['SystemRoot','WINDIR','PATH','TEMP','TMP','USERPROFILE'])if(process.env[key])env[key]=process.env[key];
+ return {...env,SHITTIMCHEST_DATA_DIR:directory,SHITTIMCHEST_PORT:String(port),SHITTIMCHEST_MEMORY_ENABLED:'false'};
+}
+async function freePort(){const listener=createServer();listener.listen(0,'127.0.0.1');await once(listener,'listening');const address=listener.address();assert.ok(address&&typeof address!=='string');await new Promise<void>(resolve=>listener.close(()=>resolve()));return address.port;}
+function alive(pid:number){try{process.kill(pid,0);return true;}catch{return false;}}
+
+test('single entry starts and attaches an authenticated independent core in a Unicode directory', {timeout:40000},async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'arona-startup-中文 空格-'));const port=await freePort();const env=environment(dir,port);let pid:number|undefined;
+ try{
+  const first=await ensureCore({env});pid=coreLocation(dir)?.pid;assert.ok(pid);assert.equal(first.started,true);assert.equal((await first.client.handshake()).protocolVersion,1);
+  const second=await ensureCore({env});assert.equal(second.started,false);assert.equal((await second.client.handshake()).instanceId,(await first.client.handshake()).instanceId);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/snapshot`)).status,401);
+  await first.client.request('/core/stop',{method:'POST'});await until(()=>alive(pid!),value=>!value,15000);assert.equal(coreLocation(dir),undefined);
+ }catch(error){const log=path.join(dir,'core.log');if(fs.existsSync(log))console.error(fs.readFileSync(log,'utf8'));throw error;}finally{if(pid&&alive(pid))process.kill(pid);await removeTemp(dir);}
+});
+
+test('invalid startup model configuration opens management mode rather than blocking repair', {timeout:40000},async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'arona-startup-repair-'));const env={...environment(dir,await freePort()),SHITTIMCHEST_MODEL_PROTOCOL:'responses'};let pid:number|undefined;
+ try{
+  const result=await ensureCore({env});pid=coreLocation(dir)?.pid;assert.deepEqual(result.diagnostics,['invalid_model_configuration']);
+  const configuration=await result.client.request<{models:unknown[]}>('/configuration');assert.deepEqual(configuration.models,[]);
+  await result.client.request('/core/stop',{method:'POST'});await until(()=>alive(pid!),value=>!value,15000);
+ }catch(error){const log=path.join(dir,'core.log');if(fs.existsSync(log))console.error(fs.readFileSync(log,'utf8'));throw error;}finally{if(pid&&alive(pid))process.kill(pid);await removeTemp(dir);}
+});
+
+test('cancelling startup terminates only the newly spawned child before returning', {timeout:20000},async()=>{
+ const {default:childProcess}=await import('node:child_process');
+ const {syncBuiltinESMExports}=await import('node:module');
+ const {mock}=await import('node:test');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'arona-startup-cancel-'));const env=environment(dir,await freePort());
+ const abort=new AbortController();const reason=new Error('synthetic startup cancellation');let pid:number|undefined;
+ const spawn=childProcess.spawn.bind(childProcess);
+ const replacement=mock.method(childProcess,'spawn',(...args:Parameters<typeof childProcess.spawn>)=>{
+  const child=spawn(...args);pid=child.pid;queueMicrotask(()=>abort.abort(reason));return child;
+ });syncBuiltinESMExports();
+ try{
+  await assert.rejects(ensureCore({env,signal:abort.signal}),error=>error===reason);
+  assert.ok(pid,'startup must have created the child');assert.equal(alive(pid),false,'owned process must be gone when cancellation returns');
+ }finally{replacement.mock.restore();syncBuiltinESMExports();if(pid&&alive(pid))process.kill(pid);await removeTemp(dir);}
+});

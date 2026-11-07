@@ -10,7 +10,7 @@ const core = await Core.open({ dataDir: process.argv[2]!, model: fixture.model }
 const server = serve({ fetch: createApp(core).fetch, hostname: '127.0.0.1', port: 0 });
 server.on('listening', () => {
   const address = server.address();
-  if (address && typeof address !== 'string') process.send?.({ type: 'ready', port: address.port });
+  if (address && typeof address !== 'string') process.send?.({ type: 'ready', port: address.port, token: core.controlToken });
 });
 process.on('message', (message) => { if (message === 'release') release(); });
 process.once('SIGTERM', () => {
