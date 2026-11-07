@@ -45,7 +45,12 @@ export function projectEvent(core: Core, event: RuntimeEvent): PublicEvent | und
   }
   const areas: Record<string, string> = { task_created: 'tasks', task_state: 'tasks', task_report: 'tasks', task_attempt_requested: 'tasks', context_state: 'contexts', configuration_state: 'configuration', approval_state: 'approvals', notification_state: 'notifications', input_status: 'conversation', message_queue_state:'message-queue', memory_updated: 'memory', method_publication: 'methods' };
   if (areas[event.kind]) return { ...base, kind: 'state', data: { area: areas[event.kind], ...(event.taskId ? { taskId: event.taskId } : {}) } };
-  if (['error', 'snapshot_failed', 'task_execution_error', 'native_cleanup_incomplete'].includes(event.kind)) return { ...base, kind: 'error', data: { code: event.kind === 'error' ? 'model_execution_failed' : String(data?.code ?? event.kind) } };
+  if (['error', 'snapshot_failed', 'task_execution_error', 'native_cleanup_incomplete'].includes(event.kind)) {
+    // Only an application error code (snake_case) is public; provider messages may echo request content.
+    const nested = (data?.error && typeof data.error === 'object' ? (data.error as Record<string, unknown>).code : undefined);
+    const code = event.kind === 'error' ? (typeof nested === 'string' && /^[a-z][a-z0-9_]{2,63}$/.test(nested) ? nested : 'model_execution_failed') : String(data?.code ?? event.kind);
+    return { ...base, kind: 'error', data: { code, ...(event.kind === 'error' && typeof data?.retryable === 'boolean' ? { retryable: data.retryable } : {}) } };
+  }
   return undefined;
 }
 

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  Box, Container, Editor, Input, Markdown, ProcessTerminal, ScrollView, SelectList, Spacer, CombinedAutocompleteProvider, Image, MouseRegion, getCapabilities, getNativeClipboard,
+  Box, Container, Editor, Loader, Input, Markdown, ProcessTerminal, ScrollView, SelectList, Spacer, CombinedAutocompleteProvider, Image, MouseRegion, getCapabilities, getNativeClipboard,
   Text, TruncatedText, TuiAltScreen, VStack, wrapTextWithAnsi, stripTerminalSequences, matchesKey, Key, CURSOR_MARKER, truncateToWidth,
   type Component, type EditorTheme, type MarkdownTheme, type OverlayHandle, type SelectItem, type AutocompleteProvider, type AutocompleteItem,
   type SelectListTheme, type Terminal, type TuiMouseEvent, type NativeClipboard,
@@ -78,7 +78,7 @@ export const tuiCommands: readonly TuiCommand[] = [
 ];
 function commandHelp() {
   return ['可用命令：', ...tuiCommands.map(command => `  ${command.usage ?? `/${command.name}`}  ${command.description}${command.aliases?.length ? `（别名 ${command.aliases.map(alias => `/${alias}`).join(' ')}）` : ''}`),
-    '快捷键：Ctrl+C 清空输入／停止运行／退出 · Shift+Tab 切换思考等级 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
+    '快捷键：Esc 停止当前回复 · Ctrl+C 清空输入／停止运行／连按两次退出 · Ctrl+D 空输入时退出 · Ctrl+O 展开或折叠工具 · Ctrl+L 选择模型 · Shift+Tab 切换思考等级 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
 }
 const supportedLevels = (levels: readonly string[]) => levels.filter(level => ['off', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level));
 type SavedProfile = { id: string; name: string; modelId: string; defaultThinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' } & ({ providerId: string } | { protocol: 'chat-completions' | 'responses' | 'messages'; baseURL: string; apiKeyEnv: string; authHeader: 'api-key' | 'bearer'; thinking: Record<string, Record<string, unknown>> });
@@ -177,6 +177,8 @@ class ToolCard extends Container {
   }
   update(next: ToolActivity) { this.data = { ...this.data, ...next, args: next.args ?? this.data.args, progress: next.progress ?? this.data.progress, summary: next.summary ?? this.data.summary }; this.rebuild(); }
   toggle() { this.expanded = !this.expanded; this.rebuild(); this.renderNow(); }
+  isExpanded() { return this.expanded; }
+  setExpanded(value: boolean) { if (this.expanded !== value) { this.expanded = value; this.rebuild(); } }
   private rebuild() {
     const state: Record<string, string> = { running: '进行中', finished: '完成', failed: '失败', denied: '已拒绝' };
     const bg = this.data.state === 'running' ? 'toolPendingBg' : this.data.state === 'finished' ? 'toolSuccessBg' : 'toolErrorBg';
@@ -209,6 +211,18 @@ class Modal implements Component {
 export type ApprovalChoice = 'once' | 'task' | 'duty' | 'decline' | 'later';
 const approvalLabels: Record<ApprovalChoice, string> = { once: '同意此次', task: '同意，并在此任务内放行同类调用', duty: '同意，并在此定时职责内放行', decline: '拒绝', later: '稍后处理' };
 const APPROVAL_PAGE = 10;
+const failureTitles: Record<string, string> = {
+  model_execution_failed: '模型请求未完成', context_capacity_exceeded: '上下文超出模型输入预算', model_credentials_unavailable: '模型凭据不可用',
+  model_profile_not_found: '模型配置不存在', model_not_found: '供应商没有这个模型', model_provider_unavailable: '模型供应商不可用', step_budget_exhausted: '已达到单次运行的最大步骤数',
+  snapshot_failed: '上下文快照保存失败', context_snapshot_failed: '上下文快照保存失败', task_execution_failed: '后台任务执行失败',
+};
+const failureHints: Record<string, string> = {
+  model_execution_failed: '可重发消息；持续失败时用 /status 查看连接，或 /model 换用其他模型。',
+  context_capacity_exceeded: '可用 /context 查看估算，在 /sessions 中从已完成轮次分支出新的上下文，或在运行设置中改为“警告并继续”。',
+  model_credentials_unavailable: '用 /login 登录供应商，或在 /menu → 凭据 中设置凭据。',
+  model_profile_not_found: '用 /model 选择已有配置，或在 /menu → 配置模型 中新建。', model_not_found: '用 /model 选择其他模型。',
+  model_provider_unavailable: '用 /login 检查供应商登录状态。', step_budget_exhausted: '可补充说明后继续，或在 /menu → 运行设置 调高最大步骤数。',
+};
 function approvalError(error: unknown) {
   const code = error instanceof AppError ? error.code : 'request_failed';
   return ({ approval_not_active: '该请求已失效（运行已结束或已被处理）', approval_not_pending: '该请求已被处理', approval_target_changed: '目标配置已变化，请在新的请求中重新审批', approval_scope_not_available: '所选授权范围不适用于此请求' } as Record<string, string>)[code] ?? label(code);
@@ -428,14 +442,18 @@ export class TerminalApp {
       if (!this.editor.isShowingAutocomplete() && (matchesKey(data, Key.alt('enter')) || matchesKey(data, Key.ctrl('q')))) { void this.followUp(); return { consume: true }; }
       if (matchesKey(data, Key.alt('up')) || matchesKey(data, Key.alt('q'))) { void this.restoreQueue(); return { consume: true }; }
       if (matchesKey(data, Key.shift('tab')) && !this.editor.isShowingAutocomplete()) { void this.cycleThinking().catch(error => { if (!this.stopped) this.note(`切换失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
+      if (matchesKey(data, Key.ctrl('o'))) { this.toggleAllTools(); return { consume: true }; }
+      if (matchesKey(data, Key.ctrl('l'))) { void this.models().catch(error => { if (!this.stopped) this.note(`操作失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
+      // Esc stops the running reply (Pi's app.interrupt); with completions open it belongs to the editor.
+      if (matchesKey(data, Key.escape) && !this.editor.isShowingAutocomplete() && this.currentRunId && this.isMainContext) { this.stopForeground(); return { consume: true }; }
+      if (matchesKey(data, Key.ctrl('d')) && !this.editor.getText()) { void this.stop(); return { consume: true }; }
       if (!matchesKey(data, Key.ctrl('c'))) return undefined;
       if (this.ui.hasActiveSelection()) { void this.copySelection(); return { consume: true }; }
       if (this.editor.getText()) { this.editor.setText(''); this.ui.requestRender(); }
-      else if (this.currentRunId && this.isMainContext) {
-        if (this.capabilities.has('foreground-interrupt')) void this.interrupt(this.contextId, this.currentRunId);
-        else this.note('服务端不支持停止当前运行。');
-      }
-      else void this.stop();
+      else if (this.currentRunId && this.isMainContext) this.stopForeground();
+      // Idle Ctrl+C asks for a second press within 500 ms, as Pi does, so a stray key never quits.
+      else if (Date.now() - this.lastCtrlC < 500) void this.stop();
+      else { this.lastCtrlC = Date.now(); this.note('再按一次 Ctrl+C 退出（或 Ctrl+D）。核心会继续运行。'); }
       return { consume: true };
     });
   }
@@ -451,7 +469,7 @@ export class TerminalApp {
     return editor;
   }
   private mountEditor() {
-    this.ui.setLayoutRoot(new VStack([this.header, { component: this.scroll, grow: 1, minSize: 1 }, this.queuePreview, this.footer, this.editor]));
+    this.ui.setLayoutRoot(new VStack([this.header, { component: this.scroll, grow: 1, minSize: 1 }, this.workingSlot, this.queuePreview, this.footer, this.editor]));
     if (this.started && !this.ui.hasOverlay()) this.ui.setFocus(this.editor);
   }
   async run(): Promise<void> {
@@ -470,7 +488,7 @@ export class TerminalApp {
   }
   stop(): Promise<void> {
     if (this.stopTask) return this.stopTask;
-    this.stopped = true; this.generation++; if (this.timer) clearTimeout(this.timer);
+    this.stopped = true; this.generation++; if (this.timer) clearTimeout(this.timer); this.working?.stop(); this.working = undefined;
     this.lifetime.abort(); this.contextController.abort(); this.streamController?.abort();
     this.pendingModal?.(); process.removeListener('SIGINT', this.onSignal); process.removeListener('SIGTERM', this.onSignal);
     this.stopTask = (async () => {
@@ -543,7 +561,8 @@ export class TerminalApp {
       this.updateCapacity(snapshot.capacity ?? null);
       void this.refreshModel();
       this.pendingApprovals = ((snapshot.approvals ?? []) as ApprovalRecord[]).filter(row => row.status === 'pending');
-      this.currentRunId = snapshot.runs?.find(run => run.status === 'running')?.id;
+      this.currentRunId = snapshot.runs?.find(run => run.status === 'running')?.id; if (this.currentRunId) this.runStartedAt = Date.parse(snapshot.runs!.find(run => run.id === this.currentRunId)!.createdAt) || Date.now();
+      this.updateWorking();
       this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.visibleAttachments.delete(context); this.lastAssistant.delete(context); this.transcript.clear();
       if (discardedAttachments) this.note('核心存储已变化，之前待发送的附件已清除，请重新选择。');
       let page: ConversationPage = snapshot.conversation; const history: string[] = []; const messages: ConversationMessage[] = [];
@@ -612,8 +631,11 @@ export class TerminalApp {
     else if (event.kind.startsWith('reply.')) this.replyEvent(event);
     else if (event.kind === 'run') {
       const data = event.data as { state?: string; reason?: string };
-      if (data.state === 'running' && event.runId) this.currentRunId = event.runId;
+      if (data.state === 'running' && event.runId) { this.currentRunId = event.runId; this.runStartedAt = Date.now(); }
       else if (data.state === 'ended' && event.runId === this.currentRunId) this.currentRunId = undefined;
+      if (data.state === 'ended' && data.reason === 'aborted') this.transcript.addChild(new Text(theme.fg('warning', '已停止当前回复。已经发生的工具操作不会自动撤销。'), 1, 0));
+      if (data.state === 'ended' && data.reason === 'error' && !this.failureShown.has(event.runId ?? '')) this.failure('model_execution_failed', event.runId);
+      this.updateWorking();
       this.status(data.state === 'running' ? '处理中' : `已连接${data.reason === 'error' ? ' · 运行失败' : ''}`);
     } else if (event.kind === 'tool') {
       const data = event.data as Omit<ToolActivity, 'contextId' | 'runId'>;
@@ -630,7 +652,7 @@ export class TerminalApp {
       if (data?.area === 'message-queue') void this.refreshQueue();
       else if (data?.area === 'approvals') void this.refreshApprovals();
       else if (data?.area === 'contexts' || data?.area === 'configuration') void this.refreshModel();
-    } else if (event.kind === 'error') this.status('运行发生错误');
+    } else if (event.kind === 'error') { const data = event.data as { code?: string; retryable?: boolean }; this.failure(String(data?.code ?? 'model_execution_failed'), event.runId, data?.retryable); this.status('运行发生错误'); }
   }
   private replyEvent(event: PublicEvent) {
     if (!event.data || typeof event.data !== 'object') throw new AppError('invalid_reply_event');
@@ -721,7 +743,7 @@ export class TerminalApp {
     this.contextId = contextId;
     this.editor = this.editors.get(contextId) ?? this.createEditor(); this.editors.set(contextId, this.editor);
     this.overlays = createOverlayHandlers(this.ui, this.editor); this.mountEditor();
-    this.currentRunId = undefined; this.contextRole = undefined; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.model = undefined; this.modelVersion++; this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.transcript.clear(); this.ui.resetTextSelection();
+    this.currentRunId = undefined; this.contextRole = undefined; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.model = undefined; this.modelVersion++; this.working?.stop(); this.working = undefined; this.workingSlot.clear(); this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.transcript.clear(); this.ui.resetTextSelection();
     this.status('连接中'); void this.loadContext(this.generation);
   }
   private request<T>(route: string, init?: RequestInit) {
@@ -742,6 +764,42 @@ export class TerminalApp {
       else if (retryable) this.uncertainWrites.delete(fingerprint);
       throw error;
     }
+  }
+  private runStartedAt = 0;
+  private readonly failureShown = new Set<string>();
+  private working?: Loader;
+  private readonly workingSlot = new Container();
+  /** Spinner with elapsed time while a run is active (Pi WorkingStatusIndicator). */
+  private updateWorking() {
+    const active = Boolean(this.currentRunId && this.isMainContext);
+    if (!active) { this.working?.stop(); this.working = undefined; this.workingSlot.clear(); return; }
+    if (!this.working) {
+      this.working = new Loader(this.ui, text => theme.fg('accent', text), text => theme.fg('muted', text), '处理中');
+      this.workingSlot.clear(); this.workingSlot.addChild(this.working); this.working.start();
+      const tick = () => { if (!this.working) return; const seconds = Math.floor((Date.now() - (this.runStartedAt || Date.now())) / 1000); this.working.setMessage(`处理中 ${seconds}s · Esc 停止 · Alt+Enter 排队`); setTimeout(tick, 1000).unref(); };
+      tick();
+    }
+  }
+  /** A readable failure line in the transcript with the next step, instead of a bare status flag. */
+  private failure(code: string, runId?: string | null, retryable?: boolean) {
+    if (runId) { if (this.failureShown.has(runId)) return; this.failureShown.add(runId); }
+    const hint = failureHints[code] ?? '';
+    this.transcript.addChild(new Spacer(1));
+    this.transcript.addChild(new Text(theme.fg('error', `运行失败：${failureTitles[code] ?? label(code)}`), 1, 0));
+    if (hint || retryable) this.transcript.addChild(new Text(theme.fg('muted', [hint, retryable ? '这是暂时性错误，可以直接重发。' : ''].filter(Boolean).join(' ')), 1, 0));
+    this.ui.requestRender();
+  }
+  private lastCtrlC = 0;
+  private stopForeground() {
+    if (!this.currentRunId) return;
+    if (this.capabilities.has('foreground-interrupt')) void this.interrupt(this.contextId, this.currentRunId);
+    else this.note('服务端不支持停止当前运行。');
+  }
+  /** Ctrl+O: expand every tool card if any is folded, otherwise fold them all (Pi app.tools.expand). */
+  private toggleAllTools() {
+    const cards = [...this.toolCards.values()]; if (!cards.length) return;
+    const expand = cards.some(card => !card.isExpanded()); for (const card of cards) card.setExpanded(expand);
+    this.ui.requestRender();
   }
   private async interrupt(contextId: string, expectedRunId: string) {
     try {
