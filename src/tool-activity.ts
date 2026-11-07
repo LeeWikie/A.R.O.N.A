@@ -36,11 +36,13 @@ function summary(value:unknown){
   }
   return {type:value===null?'null':typeof value};
 }
+/** Mastra reports validation and execution failures as a `{ error: true }` result rather than isError. */
+function isErrorResult(value:unknown){return Boolean(value&&typeof value==='object'&&!Array.isArray(value)&&(value as Record<string,unknown>).error===true);}
 export function publicToolEvent(core:Core,event:RuntimeEvent,secrets?:readonly string[],legacy=false){
   const data=event.data as Record<string,unknown>;const toolCallId=String(data.toolCallId??'');
   const previous=event.kind==='tool_start'?undefined:core.store.db.prepare("SELECT data FROM runtime_events WHERE context_id=? AND run_id IS ? AND kind='tool_start' AND json_extract(data,'$.toolCallId')=? AND seq<=? ORDER BY seq DESC LIMIT 1").get(event.contextId,event.runId,toolCallId,event.seq);
   const start=event.kind==='tool_start'?data:previous?JSON.parse(String(previous.data)) as Record<string,unknown>:undefined;
-  return {toolCallId,toolName:String(start?.toolName??data.toolName??''),state:event.kind==='tool_start'||event.kind==='tool_update'?'running':data.denied?'denied':data.isError?'failed':'finished',...(!legacy&&start?.args?{args:argsView(core,start.args,secrets)}:{}),...(legacy?{legacy:true}:{}),...(event.kind==='tool_end'?{summary:summary(data.result)}:{}),...(event.kind==='tool_update'?{progress:summary(data.partialResult)}:{})};
+  return {toolCallId,toolName:String(start?.toolName??data.toolName??''),state:event.kind==='tool_start'||event.kind==='tool_update'?'running':data.denied?'denied':data.isError||isErrorResult(data.result)?'failed':'finished',...(!legacy&&start?.args?{args:argsView(core,start.args,secrets)}:{}),...(legacy?{legacy:true}:{}),...(event.kind==='tool_end'?{summary:summary(data.result)}:{}),...(event.kind==='tool_update'?{progress:summary(data.partialResult)}:{})};
 }
 export function toolActivity(core:Core,contextId:string){
   const entries=new Map<string,Record<string,unknown>>(core.runtime.setting<Record<string,unknown>[]>(`context-tools:${contextId}`,[]).map(item=>[String(item.runId)+':'+item.toolCallId,item]));let secrets:readonly string[]|undefined;try{secrets=core.redactionValues();}catch{}

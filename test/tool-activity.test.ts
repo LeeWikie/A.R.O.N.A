@@ -30,3 +30,11 @@ test('native tools create recoverable public activity without exposing their res
   const snapshot=await(await authenticatedApp(core).request('/snapshot')).json() as {toolActivity:{toolName:string;state:string}[]};assert.ok(snapshot.toolActivity.some(tool=>tool.toolName==='emit_message'&&tool.state==='finished'));
  }finally{await core.close();await removeTemp(directory);}
 });
+
+test('a tool call rejected by input validation is shown as failed, not finished', async () => {
+  const { publicToolEvent } = await import('../src/tool-activity.js');
+  const core = { redactionValues: () => [], store: { db: { prepare: () => ({ get: () => ({ data: JSON.stringify({ toolCallId: 'x', toolName: 'task_create', args: {} }) }) }) } } };
+  const event = { seq: 2, kind: 'tool_end', contextId: 'main', runId: 'r', taskId: null, createdAt: '', data: { toolCallId: 'x', result: { error: true, message: 'Tool input validation failed' } } };
+  assert.equal(publicToolEvent(core as never, event).state, 'failed');
+  assert.equal(publicToolEvent(core as never, { ...event, data: { toolCallId: 'x', result: { ok: true } } }).state, 'finished');
+});
