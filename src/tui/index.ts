@@ -58,6 +58,7 @@ export const tuiCommands: readonly TuiCommand[] = [
   { name: 'sessions', description: '切换上下文', usage: '/sessions [ID或名称]', aliases: ['session', 'resume'] },
   { name: 'name', description: '重命名当前上下文', usage: '/name [名称]' },
   { name: 'fork', description: '从已完成的一轮分支出新对话', capability: 'context-branch' },
+  { name: 'compact', usage: '/compact [侧重说明]', description: '摘要较早对话，在新的派生上下文中继续', capability: 'context-compaction' },
   { name: 'tree', description: '按来源浏览上下文树' },
   { name: 'model', description: '切换模型', usage: '/model [配置ID或名称]', aliases: ['models'] },
   { name: 'think', description: '设置思考等级', usage: '/think <等级|default>', aliases: ['thinking'], completions: [...thinkingCommandLevels, 'default'] },
@@ -299,7 +300,7 @@ const failureTitles: Record<string, string> = {
 };
 const failureHints: Record<string, string> = {
   model_execution_failed: '可重发消息；持续失败时用 /status 查看连接，或 /model 换用其他模型。',
-  context_capacity_exceeded: '可用 /context 查看估算，在 /sessions 中从已完成轮次分支出新的上下文，或在运行设置中改为“警告并继续”。',
+  context_capacity_exceeded: '用 /compact 摘要较早对话后在新上下文中继续（原文保留），或用 /fork 只带走需要的轮次；/context 查看估算。',
   model_credentials_unavailable: '用 /login 登录供应商，或在 /menu → 凭据 中设置凭据。',
   model_profile_not_found: '用 /model 选择已有配置，或在 /menu → 配置模型 中新建。', model_not_found: '用 /model 选择其他模型。',
   model_provider_unavailable: '用 /login 检查供应商登录状态。', step_budget_exhausted: '可补充说明后继续，或在 /menu → 运行设置 调高最大步骤数。',
@@ -479,6 +480,29 @@ export class TerminalApp {
     ].join('\n')), 1, 0));
     this.ui.requestRender();
   }
+  private compactController?: AbortController;
+  private readonly compactHinted = new Set<string>();
+  /** /compact: like Pi, summarize earlier turns; unlike Pi the original context stays as it is and work continues in a derived one. */
+  private async compact(instructions = '') {
+    if (!this.isMainContext) { this.note('只能压缩交流上下文。'); return; }
+    if (this.currentRunId) { this.note('当前运行结束后再压缩。'); return; }
+    const source = this.contextId; const controller = new AbortController(); this.compactController = controller;
+    const loader = new Loader(this.ui, text => theme.fg('accent', text), text => theme.fg('muted', text), '正在压缩较早对话… Esc 取消');
+    this.workingSlot.clear(); this.workingSlot.addChild(loader); loader.start();
+    try {
+      const result = await this.request<{ context: ContextRecord; summary: string; summarizedMessages: number; keptMessages: number }>(`/contexts/${routeId(source)}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(instructions ? { instructions } : {}), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10 * 60_000)]) });
+      if (this.stopped) return;
+      this.switchContext(result.context.id);
+      this.transcript.addChild(new Spacer(1));
+      this.transcript.addChild(new Text(theme.fg('customMessageLabel', theme.bold(`已压缩：摘要 ${result.summarizedMessages} 条较早消息，原样保留最近 ${result.keptMessages} 条`)), 1, 0));
+      this.transcript.addChild(new Text(theme.fg('muted', `原上下文 ${label(source)} 未修改，可用 /sessions 返回。`), 1, 0));
+      this.transcript.addChild(new Markdown(safeTerminalText(result.summary), 1, 0, markdownTheme));
+    } catch (error) {
+      if (controller.signal.aborted) this.note('已取消压缩，原上下文未修改。');
+      else if (error instanceof AppError && error.code === 'compaction_not_needed') this.note('对话还很短，没有需要压缩的较早内容。');
+      else throw error;
+    } finally { loader.stop(); if (this.compactController === controller) this.compactController = undefined; if (!this.working) this.workingSlot.clear(); }
+  }
   /** Ctrl+P, as in Pi: next configured model for this context; the session thinking override is kept when supported. */
   private async cycleModel() {
     if (!this.isMainContext) { this.note('当前上下文无法切换模型。'); return; }
@@ -579,6 +603,7 @@ export class TerminalApp {
       if (matchesKey(data, Key.ctrl('p'))) { void this.cycleModel().catch(error => { if (!this.stopped) this.note(`切换失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('l'))) { void this.models().catch(error => { if (!this.stopped) this.note(`操作失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       // Esc stops the running reply (Pi's app.interrupt); with completions open it belongs to the editor.
+      if (matchesKey(data, Key.escape) && this.compactController) { this.compactController.abort(); return { consume: true }; }
       if (matchesKey(data, Key.escape) && !this.editor.isShowingAutocomplete() && this.currentRunId && this.isMainContext) { this.stopForeground(); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('d')) && !this.editor.getText()) { void this.stop(); return { consume: true }; }
       if (!matchesKey(data, Key.ctrl('c'))) return undefined;
@@ -744,6 +769,7 @@ export class TerminalApp {
     const percent = used / capacity.availableInputTokens * 100;
     const text = `上下文 ${capacity.lastReportedInputTokens === undefined ? '~' : ''}${percent.toFixed(1)}%/${formatTokens(capacity.availableInputTokens)}${capacity.overBudget ? (capacity.blockedBeforeProvider ? ' 已阻止' : ' 超出') : ''}`;
     this.capacityText = percent > 90 || capacity.overBudget ? theme.fg('error', text) : percent > 70 ? theme.fg('warning', text) : text;
+    if ((percent >= 80 || capacity.overBudget) && this.capabilities.has('context-compaction') && !this.compactHinted.has(this.contextId)) { this.compactHinted.add(this.contextId); this.transcript.addChild(new Text(theme.fg('warning', `上下文已用约 ${Math.min(999, Math.round(percent))}%；可用 /compact 摘要较早对话后在新上下文中继续（原文保留）。`), 1, 0)); }
   }
   private updateTool(data: ToolActivity) {
     if (data.contextId !== this.contextId || typeof data.toolCallId !== 'string' || !data.toolCallId || typeof data.toolName !== 'string' || !['running', 'finished', 'failed', 'denied'].includes(data.state)) throw new AppError('invalid_tool_event');
@@ -1070,6 +1096,7 @@ export class TerminalApp {
           await this.branchContext(current); return;
         }
         case 'tree': await this.contexts(); return;
+        case 'compact': await this.compact(arg); return;
         case 'model': {
           if (!arg) { await this.models(); return; }
           const { models } = await this.request<{ models: Array<{ id: string; name: string; modelId: string }> }>('/models');

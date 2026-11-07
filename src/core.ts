@@ -45,6 +45,7 @@ import { z } from 'zod';
 import { taskInputSchema } from './tasks.js';
 import { createWorkflows, bindWorkflowContext } from './workflows.js';
 import { ReplyStream, recoverReplies } from './reply-stream.js';
+import { findCutPoint, serializeConversation, SUMMARIZATION_PROMPT, SUMMARIZATION_SYSTEM_PROMPT, type NativeMessage } from './compaction.js';
 
 type AgentModel = Exclude<ConstructorParameters<typeof Agent>[0]['model'], Function>;
 type EndReason = 'complete' | 'aborted' | 'error' | 'suspended';
@@ -250,6 +251,36 @@ export class Core {
     }catch(error){if(copied)await this.memory.deleteThread(id);throw error;}
     finally{this.branchingContexts.delete(sourceId);}
   }
+  /**
+   * Summarize everything before the recent turns into a structured checkpoint and start a derived
+   * conversation from the summary plus the verbatim recent turns. The source context is untouched.
+   */
+  async compactContext(sourceId:string,options:{name?:string;id?:string;keepRecentTokens?:number;instructions?:string}={},signal?:AbortSignal) {
+    if(this.stopping)throw new AppError('core_stopping',503);
+    const source=this.runtime.context(sourceId);
+    if(!source||source.role!=='main'||source.archived)throw new AppError('context_not_available',409);
+    if(this.activeRuns.has(sourceId)||this.dispatchTails.has(sourceId)||this.queuedMessages(sourceId).length)throw new AppError('context_busy',409);
+    const last=this.store.db.prepare("SELECT id FROM runs WHERE context_id=? AND status='succeeded' ORDER BY rowid DESC LIMIT 1").get(sourceId);
+    if(!last)throw new AppError('branch_requires_complete_run',409);
+    const runId=String(last.id);const snapshot=this.projectMemory.snapshot(runId);
+    const messages=((snapshot.nativeMessages as {messages?:NativeMessage[]}).messages??[]);
+    const cut=findCutPoint(messages,options.keepRecentTokens);
+    if(cut<=0)throw new AppError('compaction_not_needed',409);
+    const earlier=serializeConversation(messages.slice(0,cut));
+    // The recent turns are copied verbatim by the branch; find the run whose user input starts at the cut.
+    const firstKept=messages[cut]!;const kept=this.store.db.prepare('SELECT run_id FROM signals WHERE native_id=? OR id=? LIMIT 1').get(firstKept.id,firstKept.id);
+    const fromRunId=kept?.run_id?String(kept.run_id):undefined;if(!fromRunId)throw new AppError('working_set_boundary_unavailable',409);
+    const profile=snapshot.modelProfile;
+    const summarizer=new Agent({id:'context-summarizer',name:'Context summarizer',model:this.resolveModel(profile),instructions:SUMMARIZATION_SYSTEM_PROMPT});
+    const focus=options.instructions?.trim()?`\n\nAdditional focus: ${options.instructions.trim()}`:'';
+    const generated=await summarizer.stream(`<conversation>\n${earlier}\n</conversation>\n\n${SUMMARIZATION_PROMPT}${focus}`,{maxSteps:1,abortSignal:signal,providerOptions:this.models.options(profile).providerOptions});
+    const summary=(await generated.text).trim();signal?.throwIfAborted();if(!summary)throw new AppError('compaction_summary_empty',502);
+    this.runtime.event({contextId:sourceId,runId,kind:'memory_usage',data:{sourceRunId:runId,usage:await generated.totalUsage,role:'compaction'}});
+    const branch=await this.branchContext(sourceId,runId,options.name??`${source.name} · 压缩`,options.id,fromRunId);
+    const updated=this.runtime.context(branch.id)!;
+    this.runtime.setSetting(`context-compaction:${branch.id}`,{sourceContextId:sourceId,sourceRunId:runId,fromRunId,summarizedMessages:cut,keptMessages:messages.length-cut,summary,createdAt:new Date().toISOString()});
+    return {context:updated,summary,summarizedMessages:cut,keptMessages:messages.length-cut};
+  }
   createWorkContext(input: { id?: string; name: string; purpose?: string; workspaceId?: string; role?: 'work' }) {
     this.capabilities.root(input.workspaceId ?? 'default');
     return this.runtime.createContext({ id: input.id ?? `work.${randomUUID()}`, name: input.name, purpose: input.purpose ?? '', role: 'work', modelProfile: this.runtime.setting<string>('default-work-model', 'default'), workspaceId: input.workspaceId ?? 'default' });
@@ -262,7 +293,9 @@ export class Core {
   private instructions(role: 'main' | 'work', contextId?: string) {
     const resident = contextId ? this.memoryViews.get(contextId) ?? this.projectMemory.resident() : this.projectMemory.resident();
     const mode=role==='main'&&contextId&&this.replies.has(contextId)?mainInstructions.replace('面向用户的消息经 emit_message 提交，普通模型文字不自动发布。','本次存在已授权的用户回复通道；以自然语言直接向用户交流，工具仅用于处理受托工作和管理。不要在回复中展示内部推理或工具协议。'):role==='main'?mainInstructions:workInstructions;
-    return `${identity}\n${mode}\n常驻记忆（版本 ${resident.version}，是可纠正的历史认识，不覆盖新用户要求）：\n${resident.text}`;
+    const compaction=contextId?this.runtime.setting<{sourceContextId:string;summary:string;summarizedMessages:number}|null>(`context-compaction:${contextId}`,null):null;
+    const earlier=compaction?`\n较早对话的结构化摘要（来自上下文 ${compaction.sourceContextId} 的前 ${compaction.summarizedMessages} 条消息；原文保留在来源上下文，摘要可能遗漏细节）：\n${compaction.summary}`:'';
+    return `${identity}\n${mode}\n常驻记忆（版本 ${resident.version}，是可纠正的历史认识，不覆盖新用户要求）：\n${resident.text}${earlier}`;
   }
   private grants(contextId: string) {
     const tasks = this.runtime.tasks({ contextId }).filter(x => ['pending', 'running', 'waiting', 'pausing','cancelling'].includes(x.status));

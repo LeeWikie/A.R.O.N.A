@@ -166,3 +166,22 @@ test('Ctrl+P cycles configured models and the picker marks the current one first
     assert.equal(shown[0]?.value, 'fast'); assert.match(shown[0]!.label, /^✓ /); assert.match(shown[0]!.description ?? '', /\[p\] · 当前/);
   } finally { await app.stop(); }
 });
+
+test('/compact posts focus text, switches to the derived context and shows the summary', async () => {
+  const posts: Array<{ route: string; body: unknown }> = [];
+  const client = { async request(route: string, init?: RequestInit) {
+    if (route === '/contexts/main/compact') { posts.push({ route, body: JSON.parse(String(init?.body)) }); return { context: { id: 'chat.compact', name: 'x', role: 'main' }, summary: '## Goal\n- keep going', summarizedMessages: 8, keptMessages: 2 }; }
+    return {};
+  } } as unknown as Client;
+  const app = new TerminalApp(client, 'main', new FakeTerminal());
+  const target = app as unknown as Internals & { compact(text?: string): Promise<void>; transcript: { children: Array<{ text?: string }> } };
+  const switched: string[] = []; target.switchContext = id => { switched.push(id); };
+  try {
+    target.isMainContext = true;
+    await target.compact('focus on API');
+    assert.deepEqual(posts, [{ route: '/contexts/main/compact', body: { instructions: 'focus on API' } }]);
+    assert.deepEqual(switched, ['chat.compact']);
+    const text = target.transcript.children.map(child => child.text ?? '').join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(text, /已压缩：摘要 8 条较早消息，原样保留最近 2 条/); assert.match(text, /原上下文 main 未修改/);
+  } finally { await app.stop(); }
+});

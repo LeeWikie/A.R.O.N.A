@@ -48,7 +48,7 @@ test('protocol handshake identifies a storage across restarts without leaking th
     assert.deepEqual(await (await app.request('/health')).json(), {status:'ok'});
     const firstId = first.instanceId, storageId = first.storageId;
     const response = await app.request('/protocol', {headers:{authorization:`Bearer ${first.controlToken}`}});
-    assert.deepEqual(await response.json(), {protocolVersion:1,instanceId:firstId,storageId,capabilities:['task-lifecycle-pagination','snapshot','event-stream','conversation-history','provider-auth','foreground-interrupt','reply-stream','message-queue','context-branch','web-tools','attachments','file-deliveries','context-capacity']});
+    assert.deepEqual(await response.json(), {protocolVersion:1,instanceId:firstId,storageId,capabilities:['task-lifecycle-pagination','snapshot','event-stream','conversation-history','provider-auth','foreground-interrupt','reply-stream','message-queue','context-branch','context-compaction','web-tools','attachments','file-deliveries','context-capacity']});
     await first.close();
     first = await Core.open({dataDir:dir,memoryEnabled:false});
     assert.notEqual(first.instanceId,firstId);

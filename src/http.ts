@@ -36,7 +36,7 @@ export function createApp(core: Core) {
   app.onError((error, c) => c.json({ error: error instanceof AppError ? error.code : error instanceof z.ZodError ? 'invalid_request' : 'internal_error' }, (error instanceof AppError ? error.status : error instanceof z.ZodError ? 400 : 500) as 400));
   app.notFound(c => c.json({ error: 'not_found' }, 404));
   app.get('/health', c => c.json({ status: 'ok' }));
-  app.get('/protocol', c => c.json({ protocolVersion: 1 as const, instanceId: core.instanceId, storageId: core.storageId, capabilities: ['task-lifecycle-pagination','snapshot','event-stream','conversation-history','provider-auth','foreground-interrupt','reply-stream','message-queue','context-branch','web-tools','attachments','file-deliveries','context-capacity'] }));
+  app.get('/protocol', c => c.json({ protocolVersion: 1 as const, instanceId: core.instanceId, storageId: core.storageId, capabilities: ['task-lifecycle-pagination','snapshot','event-stream','conversation-history','provider-auth','foreground-interrupt','reply-stream','message-queue','context-branch','context-compaction','web-tools','attachments','file-deliveries','context-capacity'] }));
   const readJSON = async (request: Request) => { try { return await request.json() as unknown; } catch { throw new AppError('invalid_json'); } };
   const operationKey = (request: Request) => {
     const key = request.headers.get('Idempotency-Key'); if (key !== null && !/^[\w.-]{1,128}$/.test(key)) throw new AppError('invalid_operation_id'); return key ? `http:${key}` : undefined;
@@ -67,6 +67,7 @@ export function createApp(core: Core) {
     const input = z.object({ id: contextIdSchema.optional(), name: z.string().min(1).max(200), purpose: z.string().max(8000).optional(), workspaceId: z.string().optional(),role:z.enum(['main','work']).optional() }).strict().parse(await readJSON(c.req.raw));
     const {role,...details}=input;return c.json(role==='main'?core.createConversationContext(details):core.createWorkContext(details),201);
   });
+  app.post('/contexts/:id/compact',async c=>{const body=z.object({id:contextIdSchema.optional(),name:z.string().min(1).max(200).optional(),keepRecentTokens:z.number().int().min(1000).max(200000).optional(),instructions:z.string().max(2000).optional()}).strict().parse(await readJSON(c.req.raw));return c.json(await core.compactContext(contextIdSchema.parse(c.req.param('id')),body,c.req.raw.signal),201);});
   app.post('/contexts/:id/branch',async c=>{const body=z.object({id:contextIdSchema.optional(),sourceRunId:z.string().uuid(),fromRunId:z.string().uuid().optional(),name:z.string().min(1).max(200)}).strict().parse(await readJSON(c.req.raw));return c.json(await core.branchContext(contextIdSchema.parse(c.req.param('id')),body.sourceRunId,body.name,body.id,body.fromRunId),201);});
   app.patch('/contexts/:id', async c => {
     const input = z.object({ name: z.string().min(1).max(200).optional(), purpose: z.string().max(8000).optional(), archived: z.boolean().optional() }).strict().parse(await readJSON(c.req.raw));
