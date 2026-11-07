@@ -1894,8 +1894,10 @@ export class TerminalApp {
     }
   }
   private async notifications() {
-    const { pending } = await this.request<{ pending: Array<{ id: string; contextId: string }> }>('/notifications');
-    const id = await this.choose('待处理通知', pending.map(item => ({ value: item.id, label: item.id, description: item.contextId }))); if (!id) return;
+    const { pending } = await this.request<{ pending: Array<{ id: string; contextId: string; data?: { title?: string; status?: string } }> }>('/notifications');
+    if (!pending.length) { this.note('没有待处理的通知。'); return; }
+    // Results that have not reached the conversation yet; retrying re-delivers them to the main chat.
+    const id = await this.choose('尚未送达对话的结果', pending.map(item => ({ value: item.id, label: item.data?.title ? `${label(item.data.title)} · ${label(item.data.status)}` : item.id, description: `送往 ${item.contextId}` }))); if (!id) return;
     const confirm = await this.choose('重试此通知？', [{ value: 'no', label: '返回' }, { value: 'yes', label: '重试' }]);
     if (confirm === 'yes') { await this.write(`/notifications/${routeId(id)}/retry`, {}); this.note('通知重试已提交。'); }
   }
