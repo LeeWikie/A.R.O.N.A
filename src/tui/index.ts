@@ -60,6 +60,7 @@ export const tuiCommands: readonly TuiCommand[] = [
   { name: 'fork', description: '从已完成的一轮分支出新对话', capability: 'context-branch' },
   { name: 'compact', usage: '/compact [侧重说明]', description: '摘要较早对话，在新的派生上下文中继续', capability: 'context-compaction' },
   { name: 'tree', description: '按来源浏览上下文树' },
+  { name: 'export', description: '导出当前对话（Markdown，或 .jsonl）', usage: '/export [路径]' },
   { name: 'model', description: '切换模型', usage: '/model [配置ID或名称]', aliases: ['models'] },
   { name: 'think', description: '设置思考等级', usage: '/think <等级|default>', aliases: ['thinking'], completions: [...thinkingCommandLevels, 'default'] },
   { name: 'stop', description: '停止当前运行', aliases: ['abort'], capability: 'foreground-interrupt' },
@@ -482,6 +483,35 @@ export class TerminalApp {
       '也可以在 .env 中设置 SHITTIMCHEST_MODEL_* 后重启核心。',
     ].join('\n')), 1, 0));
     this.ui.requestRender();
+  }
+  /**
+   * /export [path], as in Pi: Markdown by default, JSONL when the path ends in .jsonl. Only the public
+   * conversation (authorized messages and deliveries) is written, never tool logs or hidden reasoning.
+   * The file is written by this client, relative to where the TUI was started; existing files are kept.
+   */
+  private async exportConversation(arg: string) {
+    const context = this.contextId; const messages: ConversationMessage[] = [];
+    let page = await this.client.conversation(context, undefined, this.lifetime.signal);
+    for (;;) {
+      messages.push(...page.messages);
+      if (!page.hasMore || !page.nextCursor) break;
+      const cursor = page.nextCursor; page = await this.client.conversation(context, cursor, this.lifetime.signal);
+      if (page.hasMore && page.nextCursor === cursor) throw new AppError('history_pagination_stalled');
+    }
+    const shown = messages.filter(message => (message.role === 'user' || message.role === 'assistant') && message.status !== 'cancelled' && message.status !== 'rejected');
+    const raw = splitCommand(arg)[0];
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const target = path.resolve(this.completionBase, raw || `shittimchest-${label(this.contextName || context).replace(/[^\p{L}\p{N}._-]+/gu, '_').slice(0, 60)}-${stamp}.md`);
+    if (/(?:^|[\\/])\.private(?:[\\/]|$)/i.test(target)) throw new AppError('export_private_path');
+    const jsonl = target.endsWith('.jsonl');
+    const body = jsonl
+      ? shown.map(message => JSON.stringify({ id: message.id, role: message.role, kind: message.kind, createdAt: message.createdAt, runId: message.runId, content: message.content, ...(message.originContextId ? { originContextId: message.originContextId } : {}) })).join('\n') + '\n'
+      : [`# ${this.contextName || context}`, '', `导出时间：${new Date().toLocaleString()} · 上下文 ${context}`, '',
+        ...shown.flatMap(message => [`## ${message.role === 'user' ? '用户' : message.kind === 'artifact' ? '交付' : '阿罗娜'}${message.createdAt ? ` · ${new Date(message.createdAt).toLocaleString()}` : ''}`, '', message.content, ''])].join('\n');
+    await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    try { await fs.promises.writeFile(target, body, { encoding: 'utf8', flag: 'wx', mode: 0o600 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') { this.note(`文件已存在，未覆盖：${target}`); return; } throw error; }
+    this.note(`已导出 ${shown.length} 条消息：${target}`);
   }
   private compactController?: AbortController;
   private afterLoad?: () => void;
@@ -1119,6 +1149,7 @@ export class TerminalApp {
         }
         case 'tree': await this.contexts(); return;
         case 'compact': await this.compact(arg); return;
+        case 'export': await this.exportConversation(arg); return;
         case 'model': {
           if (!arg) { await this.models(); return; }
           const { models } = await this.request<{ models: Array<{ id: string; name: string; modelId: string }> }>('/models');

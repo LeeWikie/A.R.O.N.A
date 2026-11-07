@@ -201,3 +201,29 @@ test('attachments in the transcript are labelled by name, type and size', async 
     assert.match(text, /附件 · photo\.png · image\/png · 2\.0 KB/);
   } finally { await app.stop(); }
 });
+
+test('/export writes the public conversation as Markdown or JSONL without overwriting', async () => {
+  const { default: fs } = await import('node:fs'); const { default: os } = await import('node:os'); const { default: path } = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'arona-export-'));
+  const messages = [
+    { id: 'signal:1', contextId: 'main', role: 'user', content: 'hello', createdAt: '2026-01-01T00:00:00Z', runId: 'r', status: 'accepted', kind: 'message' },
+    { id: 'signal:2', contextId: 'main', role: 'user', content: 'withdrawn', createdAt: '2026-01-01T00:00:01Z', runId: null, status: 'cancelled', kind: 'message' },
+    { id: 'out:1', contextId: 'main', role: 'assistant', content: 'hi there', createdAt: '2026-01-01T00:00:02Z', runId: 'r', status: 'committed', kind: 'message' },
+  ];
+  const client = { async conversation() { return { messages, nextCursor: null, hasMore: false }; } } as unknown as Client;
+  const app = new TerminalApp(client, 'main', new FakeTerminal(), { completionBase: dir });
+  const target = app as unknown as Internals;
+  const notes: string[] = []; target.note = text => { notes.push(text); };
+  try {
+    await target.command('/export chat.md');
+    const md = fs.readFileSync(path.join(dir, 'chat.md'), 'utf8');
+    assert.match(md, /## 用户[\s\S]*hello[\s\S]*## 阿罗娜[\s\S]*hi there/); assert.doesNotMatch(md, /withdrawn/);
+    await target.command('/export chat.md');
+    assert.match(notes.at(-1)!, /文件已存在，未覆盖/);
+    await target.command('/export out/chat.jsonl');
+    const rows = fs.readFileSync(path.join(dir, 'out', 'chat.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(rows.map(row => row.content), ['hello', 'hi there']);
+    await target.command('/export .private/leak.md');
+    assert.match(notes.at(-1)!, /export_private_path/);
+  } finally { await app.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
