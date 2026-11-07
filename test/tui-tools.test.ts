@@ -41,3 +41,12 @@ test('folded tool lines follow Pi call renderers', async () => {
   assert.equal(plain(toolCallLine('web_fetch', { url: 'https://example.com' })), 'fetch https://example.com');
   assert.equal(plain(toolCallLine('custom_tool', {})), 'custom_tool');
 });
+
+test('task reports read as text with checks, deliveries and unresolved items', async () => {
+  const { formatReport } = await import('../src/tui/index.js');
+  const text = formatReport({ outcome: 'blocked', summary: 'Needs a key.', checks: [{ description: 'read input', passed: true }, { description: 'call API', passed: false }], deliveries: [{ kind: 'file', title: 'Result', value: 'out.txt', sha256: 'a'.repeat(64) }], unresolved: ['API key missing'] });
+  assert.match(text, /结果：受阻/); assert.match(text, /✓ read input/); assert.match(text, /✗ call API/);
+  assert.match(text, /Result（file） out\.txt · SHA-256 aaaaaaaaaaaa…/); assert.match(text, /• API key missing/);
+  assert.doesNotMatch(text, /[{}]/);
+  assert.equal(formatReport(null), '暂无报告');
+});

@@ -15,7 +15,8 @@ import type { AssetInfo } from '../assets.js';
 import type { ContextCapacity } from '../context-policy.js';
 import { fileTypeFromBuffer } from 'file-type';
 import type { ConversationMessage, ConversationPage, PublicEvent, TuiSnapshot } from '../protocol.js';
-import type { ApprovalRecord, ContextRecord, ContextRole, TaskRecord } from '../runtime-store.js';
+import type { ApprovalRecord, ContextRecord, ContextRole, TaskRecord, TaskReport } from '../runtime-store.js';
+import type { Occurrence } from '../schedules.js';
 import { createOverlayHandlers } from './upstream/tui-overlays.js';
 import { UserMessageComponent } from './upstream/user-message.js';
 import { editExternally } from './upstream/external-editor.js';
@@ -213,6 +214,21 @@ export function toolCallLine(toolName: string, args: unknown) {
   if (name === 'grep') return `${title('grep')} ${theme.fg('accent', `/${text(row.pattern)}/`)}${theme.fg('toolOutput', ` in ${text(row.path) || '.'}`)}`;
   const target = text(row.path ?? row.paths ?? row.directory ?? row.url ?? row.query ?? row.pattern ?? row.title ?? row.name);
   return target ? `${title(name)} ${theme.fg('accent', target)}` : title(name);
+}
+const reportOutcome: Record<string, string> = { succeeded: '成功', failed: '失败', blocked: '受阻' };
+/** Task report as text: outcome, summary, each check, deliveries with hash, unresolved items. */
+export function formatReport(report: TaskReport | null) {
+  if (!report) return '暂无报告';
+  const lines = [`结果：${reportOutcome[report.outcome] ?? label(report.outcome)}`, safeTerminalText(report.summary), '', '检查：', ...report.checks.map(check => `  ${check.passed ? '✓' : '✗'} ${label(check.description)}`)];
+  if (report.deliveries.length) lines.push('交付：', ...report.deliveries.map(item => `  ${label(item.title)}（${item.kind}）${item.kind === 'file' ? ` ${label(item.value)}${item.sha256 ? ` · SHA-256 ${item.sha256.slice(0, 12)}…` : ''}` : item.kind === 'json' ? '' : `：${label(item.value).slice(0, 200)}`}`));
+  if (report.unresolved.length) lines.push('未解决：', ...report.unresolved.map(item => `  • ${label(item)}`));
+  return lines.join('\n');
+}
+const occurrenceStatus: Record<string, string> = { pending: '进行中', succeeded: '成功', failed: '失败', unreported: '未报告', interrupted: '中断', blocked: '受阻', cancelled: '取消' };
+function formatOccurrence(occurrence: Occurrence) {
+  const when = new Date(occurrence.scheduledAt).toLocaleString();
+  const dispatch = occurrence.dispatchStatus === 'failed' ? ` · 未能派发 ${label(occurrence.errorCode)}` : '';
+  return `  ${when} ${occurrence.kind === 'manual' ? '（手动）' : ''}${occurrenceStatus[occurrence.report.status] ?? label(occurrence.report.status)}${dispatch}${occurrence.report.summary ? ` · ${label(occurrence.report.summary).slice(0, 120)}` : ''}`;
 }
 /** Readable key/value lines instead of raw JSON; nested values stay compact. */
 function describeFields(heading: string, value: unknown): string[] {
@@ -1792,7 +1808,7 @@ export class TerminalApp {
     const paths = await this.editStrings('工作区相对文件路径', []); if (!paths?.length) return;
     const confirmation = await this.choose('确认读取这些工作区文件以计算摘要？', [{ value: 'no', label: '返回' }, { value: 'yes', label: '确认' }]); if (confirmation !== 'yes') return;
     const result = await this.write(`/workflows/${routeId(id)}/run`, { contextId, input: { paths } });
-    this.note(`工作流结果：\n${safeTerminalText(JSON.stringify(result, null, 2))}`);
+    this.note(`工作流结果：\n${describeFields('结果', result).slice(1).join('\n') || '无输出'}`);
   }
   private async methodEvidence(original: string[]): Promise<string[] | undefined> {
     const { tasks } = await this.request<{ tasks: TaskRecord[] }>('/tasks');
@@ -1909,7 +1925,7 @@ export class TerminalApp {
       let offset = 0;
       for (;;) {
         const page = await this.request<{ occurrences: unknown[]; nextOffset: number }>(`/schedules/${routeId(id)}/occurrences?offset=${offset}&limit=40`);
-        this.note(`执行记录（${offset + 1} 起）：\n${safeTerminalText(JSON.stringify(page.occurrences, null, 2))}`);
+        this.note(`执行记录（${offset + 1} 起）：\n${(page.occurrences as Occurrence[]).map(formatOccurrence).join('\n') || '暂无'}`);
         if (page.occurrences.length < 40) return;
         if (page.nextOffset <= offset) throw new AppError('history_pagination_stalled');
         const next = await this.choose('执行记录', [{ value: 'more', label: '加载更多' }, { value: 'end', label: '返回' }]); if (next !== 'more') return;
@@ -1939,7 +1955,7 @@ export class TerminalApp {
     if (this.capabilities.has('file-deliveries')) actions.push({ value: 'deliveries', label: '下载文件交付' });
     const action = await this.choose(`${label(task.title)} · ${label(task.status)}`, actions);
     if (action === 'deliveries') { await this.taskDeliveries(id); }
-    else if (action === 'details') { const detail = await this.request<TaskRecord>(`/tasks/${routeId(id)}`); this.note(`任务 ${label(detail.title)} · ${label(detail.status)}\n${safeTerminalText(detail.content)}\n${detail.report ? safeTerminalText(JSON.stringify(detail.report, null, 2)) : '暂无报告'}`); }
+    else if (action === 'details') { const detail = await this.request<TaskRecord>(`/tasks/${routeId(id)}`); this.note(`任务 ${label(detail.title)} · ${label(detail.status)}${detail.attempt > 1 ? ` · 第 ${detail.attempt} 次尝试` : ''}\n${safeTerminalText(detail.content)}\n\n${formatReport(detail.report)}`); }
     else if (action === 'open') this.switchContext(task.contextId);
     else if (action === 'message') { const content = await this.promptLong('补充消息'); if (content?.trim()) { await this.write(`/tasks/${routeId(id)}/messages`, { content }); this.note('消息已提交。'); } }
     else if (action) { const confirm = await this.choose(`确认对任务执行 ${label(action)}？`, [{ value: 'yes', label: '确认' }, { value: 'no', label: '返回' }]); if (confirm === 'yes') { await this.write(`/tasks/${routeId(id)}/${action}`, { revision: task.revision }); this.note('任务操作已提交。'); } }
