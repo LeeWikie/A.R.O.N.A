@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  Box, Container, Editor, Loader, Input, Markdown, ProcessTerminal, ScrollView, SelectList, Spacer, CombinedAutocompleteProvider, Image, MouseRegion, getCapabilities, getNativeClipboard,
+  Box, Container, Editor, Loader, fuzzyFilter, Input, Markdown, ProcessTerminal, ScrollView, SelectList, Spacer, CombinedAutocompleteProvider, Image, MouseRegion, getCapabilities, getNativeClipboard,
   Text, TruncatedText, TuiAltScreen, VStack, wrapTextWithAnsi, stripTerminalSequences, matchesKey, Key, CURSOR_MARKER, truncateToWidth,
   type Component, type EditorTheme, type MarkdownTheme, type OverlayHandle, type SelectItem, type AutocompleteProvider, type AutocompleteItem,
   type SelectListTheme, type Terminal, type TuiMouseEvent, type NativeClipboard,
@@ -78,7 +78,7 @@ export const tuiCommands: readonly TuiCommand[] = [
 ];
 function commandHelp() {
   return ['可用命令：', ...tuiCommands.map(command => `  ${command.usage ?? `/${command.name}`}  ${command.description}${command.aliases?.length ? `（别名 ${command.aliases.map(alias => `/${alias}`).join(' ')}）` : ''}`),
-    '快捷键：Esc 停止当前回复 · Ctrl+C 清空输入／停止运行／连按两次退出 · Ctrl+D 空输入时退出 · Ctrl+O 展开或折叠工具 · Ctrl+L 选择模型 · Shift+Tab 切换思考等级 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
+    '快捷键：Esc 停止当前回复 · Ctrl+C 清空输入／停止运行／连按两次退出 · Ctrl+D 空输入时退出 · Ctrl+O 展开或折叠工具 · Ctrl+L 选择模型 · Ctrl+P 切换到下一个模型 · Shift+Tab 切换思考等级 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
 }
 const supportedLevels = (levels: readonly string[]) => levels.filter(level => ['off', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level));
 type SavedProfile = { id: string; name: string; modelId: string; defaultThinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' } & ({ providerId: string } | { protocol: 'chat-completions' | 'responses' | 'messages'; baseURL: string; apiKeyEnv: string; authHeader: 'api-key' | 'bearer'; thinking: Record<string, Record<string, unknown>> });
@@ -153,7 +153,7 @@ class SearchSelector extends Container {
       this.search.handleInput(data);
       const query = this.search.getValue();
       const selected = this.filter?.(query);
-      const filtered = selected ? selected.flatMap(value => { const item = this.items.find(candidate => candidate.value === value); return item ? [item] : []; }) : this.items.filter(item => `${item.label} ${item.value} ${item.description ?? ''}`.toLowerCase().includes(query.trim().toLowerCase()));
+      const filtered = selected ? selected.flatMap(value => { const item = this.items.find(candidate => candidate.value === value); return item ? [item] : []; }) : fuzzyFilter(this.items, query.trim(), item => `${item.label} ${item.value} ${item.description ?? ''}`);
       const next = new SelectList(filtered, 10, selectTheme);
       next.onSelect = this.list.onSelect; next.onCancel = this.list.onCancel;
       this.removeChild(this.list); this.list = next; this.addChild(next);
@@ -437,6 +437,16 @@ export class TerminalApp {
     ].join('\n')), 1, 0));
     this.ui.requestRender();
   }
+  /** Ctrl+P, as in Pi: next configured model for this context; the session thinking override is kept when supported. */
+  private async cycleModel() {
+    if (!this.isMainContext) { this.note('当前上下文无法切换模型。'); return; }
+    const { models } = await this.request<{ models: Array<{ id: string; name: string }> }>('/models');
+    if (models.length < 2) { this.note(models.length ? '只有一个已配置的模型。' : '还没有已配置的模型；/login 或 /menu → 配置模型。'); return; }
+    const index = models.findIndex(row => row.id === this.model?.profileId);
+    const next = models[(index + 1) % models.length]!;
+    await this.write(`/contexts/${routeId(this.contextId)}/model`, { profileId: next.id });
+    await this.refreshModel(); this.note(`已切换到 ${label(next.name)}${this.model?.thinkingLevel ? `（思考：${label(this.model.thinkingLevel)}）` : ''}，用于后续请求。`);
+  }
   /** Shift+Tab, as in Pi: step through the levels the current model supports and apply to later requests. */
   private async cycleThinking() {
     if (!this.model || !this.isMainContext) { this.note('当前上下文无法切换思考等级。'); return; }
@@ -524,6 +534,7 @@ export class TerminalApp {
       if (matchesKey(data, Key.alt('up')) || matchesKey(data, Key.alt('q'))) { void this.restoreQueue(); return { consume: true }; }
       if (matchesKey(data, Key.shift('tab')) && !this.editor.isShowingAutocomplete()) { void this.cycleThinking().catch(error => { if (!this.stopped) this.note(`切换失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('o'))) { this.toggleAllTools(); return { consume: true }; }
+      if (matchesKey(data, Key.ctrl('p'))) { void this.cycleModel().catch(error => { if (!this.stopped) this.note(`切换失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('l'))) { void this.models().catch(error => { if (!this.stopped) this.note(`操作失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       // Esc stops the running reply (Pi's app.interrupt); with completions open it belongs to the editor.
       if (matchesKey(data, Key.escape) && !this.editor.isShowingAutocomplete() && this.currentRunId && this.isMainContext) { this.stopForeground(); return { consume: true }; }
@@ -1196,7 +1207,10 @@ export class TerminalApp {
   }
   private async models() {
     const { models } = await this.request<{ models: Array<{ id: string; name: string; modelId: string; providerId?: string; thinking?: Record<string, unknown> }> }>('/models');
-    const id = await this.choose('选择模型', models.map(x => ({ value: x.id, label: x.name, description: x.modelId }))); if (!id) return;
+    // Pi model selector: current first with ✓, provider badge, fuzzy search.
+    const current = this.model?.profileId;
+    const ordered = [...models].sort((a, b) => Number(b.id === current) - Number(a.id === current));
+    const id = await this.choose('选择模型', ordered.map(x => ({ value: x.id, label: `${x.id === current ? '✓ ' : '  '}${x.name}`, description: `${x.modelId}${x.providerId ? ` [${x.providerId}]` : ''}${x.id === current ? ' · 当前' : ''}` }))); if (!id) return;
     const model = models.find(x => x.id === id)!;
     let levels = Object.keys(model.thinking ?? {});
     if (model.providerId) {

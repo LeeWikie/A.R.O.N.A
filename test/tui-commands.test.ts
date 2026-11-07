@@ -145,3 +145,24 @@ test('command table has unique names and aliases', () => {
   assert.equal(new Set(names).size, names.length);
   for (const name of ['help', 'new', 'sessions', 'model', 'think', 'stop', 'quit']) assert.ok(names.includes(name), name);
 });
+
+test('Ctrl+P cycles configured models and the picker marks the current one first', async () => {
+  const writes: Array<{ route: string; body: unknown }> = []; let profile = 'fast';
+  const client = { async request(route: string, init?: RequestInit) {
+    if (init?.body) { const body = JSON.parse(String(init.body)) as { profileId: string }; writes.push({ route, body }); profile = body.profileId; return {}; }
+    if (route === '/models') return { models: [{ id: 'fast', name: 'Fast', modelId: 'f-1', providerId: 'p' }, { id: 'deep', name: 'Deep', modelId: 'd-1' }] };
+    if (route === '/contexts/main/model') return { profileId: profile, name: profile, modelId: null, thinkingLevel: null, source: 'provider-default', unavailable: null, configuredProfiles: 2 };
+    return {};
+  } } as unknown as Client;
+  const app = new TerminalApp(client, 'main', new FakeTerminal());
+  const target = app as unknown as Omit<Internals, 'choose'> & { refreshModel(): Promise<void>; cycleModel(): Promise<void>; models(): Promise<void>; choose: (title: string, items: Array<{ value: string; label: string; description?: string }>) => Promise<string | undefined> };
+  try {
+    target.isMainContext = true; await target.refreshModel();
+    await target.cycleModel(); assert.deepEqual(writes.at(-1), { route: '/contexts/main/model', body: { profileId: 'deep' } });
+    await target.cycleModel(); assert.deepEqual(writes.at(-1)?.body, { profileId: 'fast' }, 'wraps around');
+    let shown: Array<{ value: string; label: string; description?: string }> = [];
+    target.choose = async (_title, items) => { shown = shown.length ? shown : items; return undefined; };
+    await target.models();
+    assert.equal(shown[0]?.value, 'fast'); assert.match(shown[0]!.label, /^✓ /); assert.match(shown[0]!.description ?? '', /\[p\] · 当前/);
+  } finally { await app.stop(); }
+});
