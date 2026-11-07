@@ -481,6 +481,7 @@ export class TerminalApp {
     this.ui.requestRender();
   }
   private compactController?: AbortController;
+  private afterLoad?: () => void;
   private readonly compactHinted = new Set<string>();
   /** /compact: like Pi, summarize earlier turns; unlike Pi the original context stays as it is and work continues in a derived one. */
   private async compact(instructions = '') {
@@ -492,11 +493,14 @@ export class TerminalApp {
     try {
       const result = await this.request<{ context: ContextRecord; summary: string; summarizedMessages: number; keptMessages: number }>(`/contexts/${routeId(source)}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(instructions ? { instructions } : {}), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10 * 60_000)]) });
       if (this.stopped) return;
+      // The card is drawn once the derived context has loaded, so the reload does not wipe it.
+      this.afterLoad = () => {
+        this.transcript.addChild(new Spacer(1));
+        this.transcript.addChild(new Text(theme.fg('customMessageLabel', theme.bold(`已压缩：摘要 ${result.summarizedMessages} 条较早消息，原样保留最近 ${result.keptMessages} 条`)), 1, 0));
+        this.transcript.addChild(new Text(theme.fg('muted', `原上下文 ${label(source)} 未修改，可用 /sessions 返回。`), 1, 0));
+        this.transcript.addChild(new Markdown(safeTerminalText(result.summary), 1, 0, markdownTheme));
+      };
       this.switchContext(result.context.id);
-      this.transcript.addChild(new Spacer(1));
-      this.transcript.addChild(new Text(theme.fg('customMessageLabel', theme.bold(`已压缩：摘要 ${result.summarizedMessages} 条较早消息，原样保留最近 ${result.keptMessages} 条`)), 1, 0));
-      this.transcript.addChild(new Text(theme.fg('muted', `原上下文 ${label(source)} 未修改，可用 /sessions 返回。`), 1, 0));
-      this.transcript.addChild(new Markdown(safeTerminalText(result.summary), 1, 0, markdownTheme));
     } catch (error) {
       if (controller.signal.aborted) this.note('已取消压缩，原上下文未修改。');
       else if (error instanceof AppError && error.code === 'compaction_not_needed') this.note('对话还很短，没有需要压缩的较早内容。');
@@ -550,6 +554,7 @@ export class TerminalApp {
   private capacityText = '';
   private isMainContext = false;
   private contextRole?: ContextRole;
+  private contextName = '';
   private workingSet?: ContextRecord['workingSet'];
   private contextReady = false;
   private cursor = 0;
@@ -628,7 +633,9 @@ export class TerminalApp {
     return editor;
   }
   private mountEditor() {
-    this.ui.setLayoutRoot(new VStack([this.header, { component: this.scroll, grow: 1, minSize: 1 }, this.workingSlot, this.queuePreview, this.footer, this.editor]));
+    // Only the transcript gives up rows when space runs out; chrome and the editor keep their height.
+    const fixed = (component: Component) => ({ component, shrink: 0 });
+    this.ui.setLayoutRoot(new VStack([fixed(this.header), { component: this.scroll, grow: 1, shrink: 1, minSize: 1 }, fixed(this.workingSlot), fixed(this.queuePreview), fixed(this.footer), fixed(this.editor)]));
     if (this.started && !this.ui.hasOverlay()) this.ui.setFocus(this.editor);
   }
   async run(): Promise<void> {
@@ -658,7 +665,7 @@ export class TerminalApp {
   }
   private status(text: string) {
     this.statusText = text;
-    this.header.setText(`${theme.fg('accent', theme.bold('ShittimChest'))}${theme.fg('dim', '  ·  ')}${label(this.contextId)}${this.contextRole && this.contextRole !== 'main' ? theme.fg('warning', ' · 只读工作上下文') : ''}${this.workingSet ? theme.fg('muted', ' · 派生工作集') : ''}`);
+    this.header.setText(`${theme.fg('accent', theme.bold('ShittimChest'))}${theme.fg('dim', '  ·  ')}${label(this.contextName || this.contextId)}${this.contextRole && this.contextRole !== 'main' ? theme.fg('warning', ' · 只读工作上下文') : ''}${this.workingSet ? theme.fg('muted', ' · 派生工作集') : ''}`);
     const attachmentCount = this.pendingAttachments.get(this.contextId)?.length ?? 0;
     const tone = /错误|失败|断开/.test(text) ? 'error' : /处理中|连接中|重连/.test(text) ? 'warning' : 'success';
     const model = this.model ? `${label(this.model.name)} • ${this.model.thinkingLevel ? label(this.model.thinkingLevel) : '思考：供应商默认'}` : '';
@@ -714,7 +721,7 @@ export class TerminalApp {
       }
       this.storageId = snapshot.storageId; this.instanceId = snapshot.instanceId; this.cursor = snapshot.watermark;
       const selectedContext = snapshot.contexts?.find(item => item.id === context);
-      this.contextRole = selectedContext?.role; this.workingSet = selectedContext?.workingSet;
+      this.contextRole = selectedContext?.role; this.workingSet = selectedContext?.workingSet; this.contextName = selectedContext?.name ?? '';
       this.isMainContext = this.contextRole === 'main';
       this.queueCount = snapshot.queuedMessages?.length ?? 0;
       this.updateCapacity(snapshot.capacity ?? null);
@@ -754,6 +761,7 @@ export class TerminalApp {
       }
       if (!this.seededHistory.has(context)) { for (const value of history.slice(-100)) this.editor.addToHistory(value); this.seededHistory.add(context); }
       this.contextReady = true;
+      const after = this.afterLoad; this.afterLoad = undefined; after?.();
       void this.presentApproval(); void this.refreshTasks();
       this.status('已连接'); void this.refreshQueue(); void this.connectStream(generation);
     } catch {
@@ -815,7 +823,13 @@ export class TerminalApp {
       if (data?.area === 'message-queue') void this.refreshQueue();
       else if (data?.area === 'approvals') void this.refreshApprovals();
       else if (data?.area === 'tasks') void this.refreshTasks();
-      else if (data?.area === 'contexts' || data?.area === 'configuration') void this.refreshModel();
+      else if (data?.area === 'contexts' || data?.area === 'configuration') {
+        void this.refreshModel();
+        const context = this.contextId;
+        void this.request<{ contexts: ContextRecord[] }>('/contexts', { signal: this.contextController.signal }).then(({ contexts }) => {
+          const row = contexts.find(item => item.id === context); if (row && context === this.contextId && !this.stopped) { this.contextName = row.name; this.status(this.statusText); }
+        }).catch(() => {});
+      }
     } else if (event.kind === 'error') { const data = event.data as { code?: string; retryable?: boolean }; this.failure(String(data?.code ?? 'model_execution_failed'), event.runId, data?.retryable); this.status('运行发生错误'); }
   }
   private replyEvent(event: PublicEvent) {
@@ -907,7 +921,7 @@ export class TerminalApp {
     this.contextId = contextId;
     this.editor = this.editors.get(contextId) ?? this.createEditor(); this.editors.set(contextId, this.editor);
     this.overlays = createOverlayHandlers(this.ui, this.editor); this.mountEditor();
-    this.currentRunId = undefined; this.contextRole = undefined; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.model = undefined; this.modelVersion++; this.usageTotal = emptyUsage(); this.usageVersion++; this.working?.stop(); this.working = undefined; this.workingSlot.clear(); this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.transcript.clear(); this.ui.resetTextSelection();
+    this.currentRunId = undefined; this.contextRole = undefined; this.contextName = ''; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.model = undefined; this.modelVersion++; this.usageTotal = emptyUsage(); this.usageVersion++; this.working?.stop(); this.working = undefined; this.workingSlot.clear(); this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.transcript.clear(); this.ui.resetTextSelection();
     this.status('连接中'); void this.loadContext(this.generation);
   }
   private request<T>(route: string, init?: RequestInit) {

@@ -175,7 +175,7 @@ test('/compact posts focus text, switches to the derived context and shows the s
   } } as unknown as Client;
   const app = new TerminalApp(client, 'main', new FakeTerminal());
   const target = app as unknown as Internals & { compact(text?: string): Promise<void>; transcript: { children: Array<{ text?: string }> } };
-  const switched: string[] = []; target.switchContext = id => { switched.push(id); };
+  const switched: string[] = []; target.switchContext = id => { switched.push(id); (app as unknown as { afterLoad?: () => void }).afterLoad?.(); };
   try {
     target.isMainContext = true;
     await target.compact('focus on API');
