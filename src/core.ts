@@ -752,7 +752,14 @@ export class Core {
     const override = (session.state.get() as {thinkingLevel?:ThinkingLevel}).thinkingLevel;
     const profile = this.models.list().find(row => row.id === profileId) as {name?:string;modelId?:string;defaultThinkingLevel?:ThinkingLevel}|undefined;
     const thinkingLevel = override ?? profile?.defaultThinkingLevel ?? null;
-    return { contextId, profileId, name: profile?.name ?? profileId, modelId: profile?.modelId ?? null, thinkingLevel, source: override ? 'session' as const : thinkingLevel ? 'profile' as const : 'provider-default' as const };
+    // Same check switchModel uses; resolving builds a client but sends nothing.
+    let unavailable: string | null = null;
+    try { if (profileId !== 'default' || !this.options.model) this.models.resolve(profileId); }
+    catch (error) { unavailable = error instanceof AppError ? error.code : 'model_unavailable'; }
+    // Pi checks provider auth before sending; do the same without refreshing OAuth.
+    const saved = this.models.profile(profileId);
+    if (!unavailable && saved && 'providerId' in saved && !(await this.providerRegistry.checkAuth(saved.providerId).catch(() => undefined))) unavailable = 'model_credentials_unavailable';
+    return { contextId, profileId, name: profile?.name ?? profileId, modelId: profile?.modelId ?? null, providerId: saved && 'providerId' in saved ? saved.providerId : null, thinkingLevel, source: override ? 'session' as const : thinkingLevel ? 'profile' as const : 'provider-default' as const, unavailable, configuredProfiles: this.models.list().length };
   }
   async switchModel(contextId: string, profileId: string, thinkingLevel?: ThinkingLevel|null) {
     if (profileId !== 'default' || !this.options.model) this.models.resolve(profileId);

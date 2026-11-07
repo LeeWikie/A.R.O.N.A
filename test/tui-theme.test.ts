@@ -52,6 +52,32 @@ class FakeTerminal implements Terminal {
   start() {} stop() {} async drainInput() {} write() {} moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {} setProgramStatus() {}
 }
 
+test('missing model is reported and a send is intercepted locally with guidance', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'arona-no-model-'));
+  const core = await Core.open({ dataDir: directory, memoryEnabled: false });
+  try {
+    const state = await core.modelState('main');
+    assert.equal(state.unavailable, 'model_profile_not_found'); assert.equal(state.configuredProfiles, 0);
+    const sent: string[] = [];
+    const client = { async request(route: string, init?: RequestInit) {
+      if (route === '/contexts/main/model') return core.modelState('main');
+      if (route === '/messages') { sent.push(String(init?.body)); return { status: 'accepted' }; }
+      return {};
+    } } as unknown as Client;
+    const app = new TerminalApp(client, 'main', new FakeTerminal());
+    const target = app as unknown as { isMainContext: boolean; contextRole: string; contextReady: boolean; refreshModel(): Promise<void>; submit(text: string): Promise<void>; editor: { getText(): string }; transcript: { children: Array<{ text?: string }> } };
+    try {
+      target.isMainContext = true; target.contextRole = 'main'; target.contextReady = true;
+      await target.refreshModel();
+      const text = () => target.transcript.children.map(child => child.text ?? '').join('\n');
+      assert.match(text(), /还没有可用的模型/); assert.match(text(), /\/login/);
+      await target.submit('hello');
+      assert.deepEqual(sent, [], 'nothing is sent while no model can run');
+      assert.equal(target.editor.getText(), 'hello', 'the message stays in the editor');
+    } finally { await app.stop(); }
+  } finally { await core.close(); await removeTemp(directory); }
+});
+
 test('model state reports effective thinking and Shift+Tab cycles supported levels', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'arona-model-state-'));
   const core = await Core.open({ dataDir: directory, memoryEnabled: false });
@@ -60,7 +86,7 @@ test('model state reports effective thinking and Shift+Tab cycles supported leve
     core.providerRegistry.setProvider(faux.provider);
     core.configure('model', { id: 'think', name: 'Thinker', providerId: 'fake', modelId: 'reasoner', defaultThinkingLevel: 'high' });
     await core.switchModel('main', 'think');
-    assert.deepEqual(await core.modelState('main'), { contextId: 'main', profileId: 'think', name: 'Thinker', modelId: 'reasoner', thinkingLevel: 'high', source: 'profile' });
+    assert.deepEqual(await core.modelState('main'), { contextId: 'main', profileId: 'think', name: 'Thinker', modelId: 'reasoner', thinkingLevel: 'high', source: 'profile', unavailable: null, configuredProfiles: 1 });
     await core.switchModel('main', 'think', 'low');
     assert.equal((await core.modelState('main')).source, 'session');
     await core.switchModel('main', 'think', null);

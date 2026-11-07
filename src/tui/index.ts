@@ -211,6 +211,32 @@ class Modal implements Component {
 export type ApprovalChoice = 'once' | 'task' | 'duty' | 'decline' | 'later';
 const approvalLabels: Record<ApprovalChoice, string> = { once: '同意此次', task: '同意，并在此任务内放行同类调用', duty: '同意，并在此定时职责内放行', decline: '拒绝', later: '稍后处理' };
 const APPROVAL_PAGE = 10;
+/** Pi footer formatTokens. */
+export function formatTokens(count: number) {
+  if (count < 1000) return String(count);
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+  return `${Math.round(count / 1000000)}M`;
+}
+interface UsageTotals { input: number; output: number; cacheRead: number | null; cacheWrite: number | null; reasoning: number | null }
+const emptyUsage = (): UsageTotals => ({ input: 0, output: 0, cacheRead: null, cacheWrite: null, reasoning: null });
+function addUsage(total: UsageTotals, usage: Record<string, unknown>) {
+  const n = (key: string) => typeof usage[key] === 'number' && Number.isFinite(usage[key]) && (usage[key] as number) >= 0 ? usage[key] as number : undefined;
+  total.input += n('promptTokens') ?? 0; total.output += n('completionTokens') ?? 0;
+  const read = n('cachedInputTokens'), write = n('cacheCreationInputTokens'), reasoning = n('reasoningTokens');
+  if (read !== undefined) total.cacheRead = (total.cacheRead ?? 0) + read;
+  if (write !== undefined) total.cacheWrite = (total.cacheWrite ?? 0) + write;
+  if (reasoning !== undefined) total.reasoning = (total.reasoning ?? 0) + reasoning;
+  return total;
+}
+/** ↑input ↓output R/W cache, as in Pi's footer; unreported cache fields are omitted, not shown as zero. */
+function usageLine(total: UsageTotals) {
+  const parts = [`↑${formatTokens(total.input)}`, `↓${formatTokens(total.output)}`];
+  if (total.cacheRead !== null) parts.push(`R${formatTokens(total.cacheRead)}`);
+  if (total.cacheWrite !== null) parts.push(`W${formatTokens(total.cacheWrite)}`);
+  return parts.join(' ');
+}
 const failureTitles: Record<string, string> = {
   model_execution_failed: '模型请求未完成', context_capacity_exceeded: '上下文超出模型输入预算', model_credentials_unavailable: '模型凭据不可用',
   model_profile_not_found: '模型配置不存在', model_not_found: '供应商没有这个模型', model_provider_unavailable: '模型供应商不可用', step_budget_exhausted: '已达到单次运行的最大步骤数',
@@ -346,7 +372,8 @@ export class TerminalApp {
       handle = this.overlays.openOverlay(prompt, { width: '90%', maxHeight: '80%', margin: 1 });
     });
   }
-  private model?: { profileId: string; name: string; modelId: string | null; thinkingLevel: string | null; source: 'session' | 'profile' | 'provider-default' };
+  private model?: { profileId: string; name: string; modelId: string | null; thinkingLevel: string | null; source: 'session' | 'profile' | 'provider-default'; unavailable?: string | null; configuredProfiles?: number; providerId?: string | null };
+  private guidanceShown = new Set<string>();
   private modelVersion = 0;
   private async refreshModel() {
     const context = this.contextId; const version = ++this.modelVersion;
@@ -354,7 +381,24 @@ export class TerminalApp {
       const state = await this.request<NonNullable<TerminalApp['model']>>(`/contexts/${routeId(context)}/model`, { signal: this.contextController.signal });
       if (this.stopped || context !== this.contextId || version !== this.modelVersion) return;
       this.model = state; this.editor.borderColor = text => theme.thinking(state.thinkingLevel ?? 'off', text); this.status(this.statusText);
+      if (state.unavailable && this.isMainContext && !this.guidanceShown.has(context)) { this.guidanceShown.add(context); this.modelGuidance(); }
     } catch { /* Older cores have no model endpoint; the footer simply omits the model. */ }
+  }
+  /** Shown once per context when the selected model cannot be used (Pi auth-guidance). */
+  private modelGuidance() {
+    const code = this.model?.unavailable ?? '';
+    const none = !this.model?.configuredProfiles;
+    this.transcript.addChild(new Spacer(1));
+    const provider = this.model?.providerId ? label(this.model.providerId) : '';
+    this.transcript.addChild(new Text(theme.fg('warning', theme.bold(none ? '还没有可用的模型' : code === 'model_credentials_unavailable' && provider ? `${provider} 尚未登录或凭据已失效` : `当前模型不可用：${failureTitles[code] ?? label(code)}`)), 1, 0));
+    this.transcript.addChild(new Text(theme.fg('muted', [
+      ...(code === 'model_credentials_unavailable' && provider ? [`  /login   重新登录 ${provider}`] : []),
+      '  /login   登录供应商（OAuth 或 API key）',
+      '  /menu → 配置模型   添加 Chat Completions / Responses / Messages 接口',
+      '  /model   选择已配置的模型',
+      '也可以在 .env 中设置 SHITTIMCHEST_MODEL_* 后重启核心。',
+    ].join('\n')), 1, 0));
+    this.ui.requestRender();
   }
   /** Shift+Tab, as in Pi: step through the levels the current model supports and apply to later requests. */
   private async cycleThinking() {
@@ -503,7 +547,7 @@ export class TerminalApp {
     const attachmentCount = this.pendingAttachments.get(this.contextId)?.length ?? 0;
     const tone = /错误|失败|断开/.test(text) ? 'error' : /处理中|连接中|重连/.test(text) ? 'warning' : 'success';
     const model = this.model ? `${label(this.model.name)} • ${this.model.thinkingLevel ? label(this.model.thinkingLevel) : '思考：供应商默认'}` : '';
-    const parts = [theme.fg(tone, label(text)), this.capacityText && theme.fg('dim', this.capacityText), this.usageText && theme.fg('dim', this.usageText), this.queueCount ? theme.fg('warning', `队列 ${this.queueCount}`) : '', attachmentCount ? theme.fg('dim', `待发送附件 ${attachmentCount}`) : '', this.pendingApprovals.length ? theme.fg('warning', `待审批 ${this.pendingApprovals.length}`) : '', model && theme.thinking(this.model?.thinkingLevel ?? 'off', model)].filter(Boolean);
+    const parts = [theme.fg(tone, label(text)), this.capacityText, this.usageText && theme.fg('dim', this.usageText), this.queueCount ? theme.fg('warning', `队列 ${this.queueCount}`) : '', attachmentCount ? theme.fg('dim', `待发送附件 ${attachmentCount}`) : '', this.pendingApprovals.length ? theme.fg('warning', `待审批 ${this.pendingApprovals.length}`) : '', model && theme.thinking(this.model?.thinkingLevel ?? 'off', model)].filter(Boolean);
     this.footer.setText(`${parts.join(theme.fg('dim', '  ·  '))}\n${theme.fg('dim', '/help 命令  /menu 管理  /quit 退出  ·  Shift+Tab 思考等级  ·  PageUp/PageDown 浏览')}`);
     this.ui.requestRender();
   }
@@ -559,7 +603,7 @@ export class TerminalApp {
       this.isMainContext = this.contextRole === 'main';
       this.queueCount = snapshot.queuedMessages?.length ?? 0;
       this.updateCapacity(snapshot.capacity ?? null);
-      void this.refreshModel();
+      void this.refreshModel(); void this.refreshUsage();
       this.pendingApprovals = ((snapshot.approvals ?? []) as ApprovalRecord[]).filter(row => row.status === 'pending');
       this.currentRunId = snapshot.runs?.find(run => run.status === 'running')?.id; if (this.currentRunId) this.runStartedAt = Date.parse(snapshot.runs!.find(run => run.id === this.currentRunId)!.createdAt) || Date.now();
       this.updateWorking();
@@ -605,8 +649,11 @@ export class TerminalApp {
   private updateCapacity(capacity: ContextCapacity | null) {
     if (!capacity) { this.capacityText = ''; return; }
     if (!Number.isFinite(capacity.estimatedInputTokens) || capacity.estimatedInputTokens < 0 || (capacity.availableInputTokens !== null && (!Number.isFinite(capacity.availableInputTokens) || capacity.availableInputTokens < 0))) throw new AppError('invalid_capacity');
-    const limit = capacity.availableInputTokens === null ? '上限未知' : `可用输入 ${capacity.availableInputTokens}`;
-    this.capacityText = `估算输入 ${capacity.estimatedInputTokens} / ${limit}${capacity.overBudget ? (capacity.blockedBeforeProvider ? ' · 已阻止' : ' · 超出预算') : ''}`;
+    const used = capacity.lastReportedInputTokens ?? capacity.estimatedInputTokens;
+    if (capacity.availableInputTokens === null || capacity.availableInputTokens === 0) { this.capacityText = `上下文 ~${formatTokens(used)}/?`; return; }
+    const percent = used / capacity.availableInputTokens * 100;
+    const text = `上下文 ${capacity.lastReportedInputTokens === undefined ? '~' : ''}${percent.toFixed(1)}%/${formatTokens(capacity.availableInputTokens)}${capacity.overBudget ? (capacity.blockedBeforeProvider ? ' 已阻止' : ' 超出') : ''}`;
+    this.capacityText = percent > 90 || capacity.overBudget ? theme.fg('error', text) : percent > 70 ? theme.fg('warning', text) : text;
   }
   private updateTool(data: ToolActivity) {
     if (data.contextId !== this.contextId || typeof data.toolCallId !== 'string' || !data.toolCallId || typeof data.toolName !== 'string' || !['running', 'finished', 'failed', 'denied'].includes(data.state)) throw new AppError('invalid_tool_event');
@@ -644,9 +691,8 @@ export class TerminalApp {
     } else if (event.kind === 'capacity') {
       this.updateCapacity(event.data as ContextCapacity); this.status(this.statusText);
     } else if (event.kind === 'usage') {
-      const data = event.data as { promptTokens?: unknown; completionTokens?: unknown; totalTokens?: unknown };
-      const fields = ([['输入', data?.promptTokens], ['输出', data?.completionTokens], ['合计', data?.totalTokens]] as const).flatMap(([name, count]) => typeof count === 'number' && Number.isFinite(count) && count >= 0 ? [`${name} ${count}`] : []);
-      if (fields.length) { this.usageText = `用量 ${fields.join(' / ')}`; this.status(this.statusText); }
+      // Each event is one model step; the footer shows the context's running total.
+      if (event.data && typeof event.data === 'object') { addUsage(this.usageTotal, event.data as Record<string, unknown>); this.usageText = usageLine(this.usageTotal); this.status(this.statusText); }
     } else if (event.kind === 'state') {
       const data = event.data as { area?: string };
       if (data?.area === 'message-queue') void this.refreshQueue();
@@ -743,7 +789,7 @@ export class TerminalApp {
     this.contextId = contextId;
     this.editor = this.editors.get(contextId) ?? this.createEditor(); this.editors.set(contextId, this.editor);
     this.overlays = createOverlayHandlers(this.ui, this.editor); this.mountEditor();
-    this.currentRunId = undefined; this.contextRole = undefined; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.model = undefined; this.modelVersion++; this.working?.stop(); this.working = undefined; this.workingSlot.clear(); this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.transcript.clear(); this.ui.resetTextSelection();
+    this.currentRunId = undefined; this.contextRole = undefined; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.model = undefined; this.modelVersion++; this.usageTotal = emptyUsage(); this.usageVersion++; this.working?.stop(); this.working = undefined; this.workingSlot.clear(); this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.transcript.clear(); this.ui.resetTextSelection();
     this.status('连接中'); void this.loadContext(this.generation);
   }
   private request<T>(route: string, init?: RequestInit) {
@@ -766,6 +812,17 @@ export class TerminalApp {
     }
   }
   private runStartedAt = 0;
+  private usageTotal: UsageTotals = emptyUsage();
+  private usageVersion = 0;
+  private async refreshUsage() {
+    const context = this.contextId; const version = ++this.usageVersion;
+    try {
+      const report = await this.request<{ contexts?: Array<{ contextId: string; usage?: Record<string, unknown> }> }>(`/usage?contextId=${routeId(context)}`, { signal: this.contextController.signal });
+      if (this.stopped || context !== this.contextId || version !== this.usageVersion) return;
+      const row = report.contexts?.find(item => item.contextId === context);
+      this.usageTotal = addUsage(emptyUsage(), row?.usage ?? {}); this.usageText = this.usageTotal.input || this.usageTotal.output ? usageLine(this.usageTotal) : ''; this.status(this.statusText);
+    } catch { /* Usage is informational. */ }
+  }
   private readonly failureShown = new Set<string>();
   private working?: Loader;
   private readonly workingSlot = new Container();
@@ -845,6 +902,7 @@ export class TerminalApp {
     if (!staged.length && /^\/[a-z]/i.test(text.trim())) { await this.command(text.trim()); return; }
     if (!this.contextRole || !this.contextReady) { this.editor.setText(text); this.note('上下文尚未就绪，请等待连接。'); return; }
     if (this.contextRole !== 'main') { this.editor.setText(text); this.note('工作上下文为只读；请通过任务菜单发送补充。'); return; }
+    if (this.model?.unavailable) { this.guidanceShown.add(this.contextId); await this.refreshModel(); if (this.model?.unavailable) { this.editor.setText(text); this.modelGuidance(); return; } }
     const context = this.contextId; const observedRunId = this.currentRunId;
     const attachmentIds = staged.map(item => item.id);
     if (attachmentIds.length) {
@@ -936,7 +994,7 @@ export class TerminalApp {
         }
         case 'copy': await this.copySelectionOrLast(); return;
         case 'status': this.note(this.statusSummary()); return;
-        case 'usage': { const usage = await this.request(`/usage?contextId=${routeId(this.contextId)}`); this.note(`当前上下文用量：\n${safeTerminalText(JSON.stringify(usage, null, 2))}`); return; }
+        case 'usage': await this.showUsage(); return;
         case 'context': await this.showCapacity(); return;
         case 'tasks': await this.tasks(); return;
         case 'task': await this.createTask(arg || undefined); return;
@@ -1033,7 +1091,7 @@ export class TerminalApp {
       else if (action === 'notifications') await this.notifications();
       else if (action === 'external-editor') await this.externalEditor();
       else if (action === 'tools') await this.toolActivity();
-      else if (action === 'usage') { const usage = await this.request(`/usage?contextId=${routeId(this.contextId)}`); this.note(`当前上下文用量：\n${safeTerminalText(JSON.stringify(usage, null, 2))}`); }
+      else if (action === 'usage') await this.showUsage();
       else if (action === 'capacity') await this.showCapacity();
       else if (action === 'credentials') await this.credentials();
       else if (action === 'provider-auth') await this.providerAuth();
@@ -1585,6 +1643,21 @@ export class TerminalApp {
     else throw new AppError('invalid_selection');
     const confirm = await this.choose('保存会断开当前连接，确认继续？', [{ value: 'no', label: '返回' }, { value: 'yes', label: '保存' }]);
     if (confirm === 'yes') { await this.write('/configuration/mcp', config); this.note('连接配置已更新。'); }
+  }
+  private async showUsage() {
+    const report = await this.request<{ contexts?: Array<{ contextId: string; role?: string; usage?: Record<string, unknown> }>; runs?: Array<{ runId?: string; modelProfile?: string | null; usage?: Record<string, unknown> }>; cost?: unknown }>(`/usage?contextId=${routeId(this.contextId)}`);
+    const row = report.contexts?.find(item => item.contextId === this.contextId);
+    const total = addUsage(emptyUsage(), row?.usage ?? {});
+    const byProfile = new Map<string, UsageTotals>();
+    for (const run of report.runs ?? []) { const key = run.modelProfile ?? '未知'; byProfile.set(key, addUsage(byProfile.get(key) ?? emptyUsage(), run.usage ?? {})); }
+    const fmt = (value: number | null) => value === null ? '未报告' : value.toLocaleString('en-US');
+    const lines = [
+      `上下文 ${label(this.contextId)} 的累计用量（供应商实际返回）`,
+      `  输入      ${fmt(total.input)}`, `  输出      ${fmt(total.output)}`, `  缓存读取  ${fmt(total.cacheRead)}`, `  缓存写入  ${fmt(total.cacheWrite)}`, `  推理      ${fmt(total.reasoning)}`,
+      ...(byProfile.size > 1 ? ['按模型配置：', ...[...byProfile].map(([profile, usage]) => `  ${label(profile)}  ${usageLine(usage)}`)] : []),
+      '费用：未知（不按估算价格计算）',
+    ];
+    this.note(lines.join('\n'));
   }
   private async showCapacity() {
     const { capacity } = await this.request<{ capacity: ContextCapacity | null }>(`/contexts/${routeId(this.contextId)}/capacity`);

@@ -94,3 +94,31 @@ test('Esc stops the observed run; failures and aborts are explained in the trans
     terminal.input('\x03'); terminal.input('\x03'); await running;
   } finally { await app.stop(); }
 }));
+
+test('footer accumulates usage per step and /usage prints a table, not JSON', () => withTty(async () => {
+  const { client, release } = fixture([
+    { seq: 1, contextId: 'main', runId: 'r', kind: 'usage', data: { promptTokens: 1200, completionTokens: 30, cachedInputTokens: 1000 } },
+    { seq: 2, contextId: 'main', runId: 'r', kind: 'usage', data: { promptTokens: 1300, completionTokens: 20 } },
+    { seq: 3, contextId: 'main', runId: 'r', kind: 'capacity', data: { estimatedInputTokens: 9000, availableInputTokens: 10000, overBudget: false, blockedBeforeProvider: false } },
+  ]);
+  const base = client.request.bind(client) as (route: string, init?: RequestInit) => Promise<unknown>;
+  (client as unknown as { request: typeof base }).request = async (route, init) => route.startsWith('/usage')
+    ? { contexts: [{ contextId: 'main', usage: { promptTokens: 0, completionTokens: 0 } }], runs: [{ runId: 'r', modelProfile: 'a', usage: { promptTokens: 2500, completionTokens: 50 } }, { runId: 's', modelProfile: 'b', usage: { promptTokens: 10, completionTokens: 1 } }] }
+    : base(route, init);
+  const terminal = new TypingTerminal(); const app = new TerminalApp(client, 'main', terminal);
+  const target = app as unknown as { footer: { render(width: number): string[] }; command(text: string): Promise<void> };
+  try {
+    const running = app.run(); await settle(); release(); await settle(150);
+    const footer = target.footer.render(160).join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(footer, /↑2\.5k ↓50 R1\.0k/, 'per-step usage is summed; cache read shown once reported');
+    assert.doesNotMatch(footer, / W\d/, 'unreported cache write is omitted');
+    assert.match(footer, /上下文 ~90\.0%\/10k/);
+    await target.command('/usage');
+    const text = transcript(app);
+    assert.match(text, /缓存读取  未报告/);
+    assert.match(text, /按模型配置：/);
+    assert.match(text, /费用：未知/);
+    assert.doesNotMatch(text, /[{}]/);
+    terminal.input('\x03'); terminal.input('\x03'); await running;
+  } finally { await app.stop(); }
+}));
