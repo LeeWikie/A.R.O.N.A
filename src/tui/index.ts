@@ -83,7 +83,7 @@ export const tuiCommands: readonly TuiCommand[] = [
 ];
 function commandHelp() {
   return ['可用命令：', ...tuiCommands.map(command => `  ${command.usage ?? `/${command.name}`}  ${command.description}${command.aliases?.length ? `（别名 ${command.aliases.map(alias => `/${alias}`).join(' ')}）` : ''}`),
-    '快捷键：Esc 停止当前回复 · Ctrl+C 清空输入／停止运行／连按两次退出 · Ctrl+D 空输入时退出 · Ctrl+O 展开或折叠工具 · Ctrl+L 选择模型 · Ctrl+P 切换到下一个模型 · Shift+Tab 切换思考等级 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
+    '快捷键：Esc 停止当前回复 · Ctrl+C 清空输入／停止运行／连按两次退出 · Ctrl+D 空输入时退出 · Ctrl+O 展开或折叠工具 · Ctrl+Z 挂起到后台（fg 恢复） · Ctrl+L 选择模型 · Ctrl+P 切换到下一个模型 · Shift+Tab 切换思考等级 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
 }
 const supportedLevels = (levels: readonly string[]) => levels.filter(level => ['off', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level));
 type SavedProfile = { id: string; name: string; modelId: string; defaultThinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' } & ({ providerId: string } | { protocol: 'chat-completions' | 'responses' | 'messages'; baseURL: string; apiKeyEnv: string; authHeader: 'api-key' | 'bearer'; thinking: Record<string, Record<string, unknown>> });
@@ -638,6 +638,7 @@ export class TerminalApp {
       if (matchesKey(data, Key.alt('up')) || matchesKey(data, Key.alt('q'))) { void this.restoreQueue(); return { consume: true }; }
       if (matchesKey(data, Key.shift('tab')) && !this.editor.isShowingAutocomplete()) { void this.cycleThinking().catch(error => { if (!this.stopped) this.note(`切换失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('o'))) { this.toggleAllTools(); return { consume: true }; }
+      if (matchesKey(data, Key.ctrl('z'))) { this.suspend(); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('p'))) { void this.cycleModel().catch(error => { if (!this.stopped) this.note(`切换失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       if (matchesKey(data, Key.ctrl('l'))) { void this.models().catch(error => { if (!this.stopped) this.note(`操作失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       // Esc stops the running reply (Pi's app.interrupt); with completions open it belongs to the editor.
@@ -1017,6 +1018,15 @@ export class TerminalApp {
     this.ui.requestRender();
   }
   private lastCtrlC = 0;
+  /** Ctrl+Z, as in Pi: hand the terminal back to the shell; fg resumes. The core keeps running either way. */
+  private suspend() {
+    if (process.platform === 'win32') { this.note('Windows 不支持挂起到后台。'); return; }
+    const keepAlive = setInterval(() => {}, 2 ** 30); const ignore = () => {};
+    process.on('SIGINT', ignore);
+    process.once('SIGCONT', () => { clearInterval(keepAlive); process.removeListener('SIGINT', ignore); if (!this.stopped) { this.started = true; this.ui.start(); this.ui.requestRender(true); } });
+    try { this.ui.stop(); this.started = false; process.kill(0, 'SIGTSTP'); }
+    catch { clearInterval(keepAlive); process.removeListener('SIGINT', ignore); this.started = true; this.ui.start(); this.note('无法挂起到后台。'); }
+  }
   private stopForeground() {
     if (!this.currentRunId) return;
     if (this.capabilities.has('foreground-interrupt')) void this.interrupt(this.contextId, this.currentRunId);

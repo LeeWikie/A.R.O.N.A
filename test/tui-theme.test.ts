@@ -129,3 +129,12 @@ test('model state reports effective thinking and Shift+Tab cycles supported leve
     } finally { await app.stop(); }
   } finally { await core.close(); await removeTemp(directory); }
 });
+
+test('Markdown links become OSC 8 hyperlinks when the terminal supports them', async () => {
+  const { setCapabilities, resetCapabilitiesCache } = await import('@earendil-works/pi-tui');
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+  try {
+    const lines = new Markdown('see [docs](https://example.com/a)', 0, 0, new Theme('dark', 'truecolor').markdown()).render(60).join('');
+    assert.ok(lines.includes('\x1b]8;;https://example.com/a\x1b\\'));
+  } finally { resetCapabilitiesCache(); }
+});
