@@ -183,16 +183,53 @@ class ToolCard extends Container {
     const state: Record<string, string> = { running: '进行中', finished: '完成', failed: '失败', denied: '已拒绝' };
     const bg = this.data.state === 'running' ? 'toolPendingBg' : this.data.state === 'finished' ? 'toolSuccessBg' : 'toolErrorBg';
     const paint = (text: string) => theme.bg(bg, text); this.title.setCustomBgFn(paint); this.detail.setCustomBgFn(paint);
-    this.title.setText(`${theme.fg('muted', this.expanded ? '▾' : '▸')} ${theme.fg('toolTitle', theme.bold(label(this.data.toolName || '工具')))} ${theme.fg('muted', `· ${state[this.data.state] ?? label(this.data.state)}`)}${this.data.originContextId ? theme.fg('muted', ` · 来自 ${label(this.data.originContextId)}`) : ''}`);
+    const elapsed = this.data.startedAt && this.data.updatedAt ? (Date.parse(this.data.updatedAt) - Date.parse(this.data.startedAt)) / 1000 : NaN;
+    const timing = Number.isFinite(elapsed) && elapsed >= 0.1 && this.data.state !== 'running' ? ` ${elapsed.toFixed(1)}s` : '';
+    this.title.setText(`${theme.fg('muted', this.expanded ? '▾' : '▸')} ${toolCallLine(this.data.toolName, this.data.args)} ${theme.fg(this.data.state === 'failed' || this.data.state === 'denied' ? 'error' : 'muted', `· ${state[this.data.state] ?? label(this.data.state)}${timing}`)}${this.data.originContextId ? theme.fg('muted', ` · 来自 ${label(this.data.originContextId)}`) : ''}`);
     this.clear(); this.addChild(this.title);
     if (this.expanded) {
-      const args = this.data.args === undefined ? '未提供' : JSON.stringify(this.data.args, null, 2);
-      const progress = this.data.progress === undefined ? '' : `\n进度：\n${JSON.stringify(this.data.progress, null, 2)}`;
-      const summary = this.data.summary === undefined ? '' : `\n结果统计：\n${JSON.stringify(this.data.summary, null, 2)}`;
-      const truncated = /"truncated"\s*:\s*true/.test(args ?? '') ? '\n部分参数已截断。' : '';
-      this.detail.setText(theme.fg('toolOutput', safeTerminalText(`参数：\n${args}${truncated}${progress}${summary}${this.data.legacy ? '\n旧记录不包含公开参数。' : ''}`))); this.addChild(this.detail);
+      const lines = [...describeFields('参数', this.data.args), ...describeFields('进度', this.data.progress), ...describeFields('结果', this.data.summary)];
+      if (this.data.legacy) lines.push('旧记录不包含公开参数。');
+      if (!lines.length) lines.push('没有可公开的参数或结果统计。');
+      this.detail.setText(theme.fg('toolOutput', safeTerminalText(lines.join('\n')))); this.addChild(this.detail);
     }
   }
+}
+
+const toolLabels: Record<string, string> = {
+  mastra_workspace_execute_command: '$', mastra_workspace_read_file: 'read', mastra_workspace_write_file: 'write', mastra_workspace_apply_patch: 'edit',
+  mastra_workspace_list_files: 'ls', mastra_workspace_grep: 'grep', mastra_workspace_file_stat: 'stat', mastra_workspace_mkdir: 'mkdir',
+  mastra_workspace_get_process_output: 'output', mastra_workspace_kill_process: 'kill', web_fetch: 'fetch', web_search: 'search',
+};
+/** Folded tool line in the shape of Pi's call renderers: `$ cmd`, `read path`, `grep /pat/ in dir`. */
+export function toolCallLine(toolName: string, args: unknown) {
+  const row = args && typeof args === 'object' ? args as Record<string, unknown> : {};
+  const text = (value: unknown) => typeof value === 'string' ? safeTerminalText(value).replace(/\s+/g, ' ').slice(0, 160) : Array.isArray(value) ? value.map(String).join(', ').slice(0, 160) : '';
+  const name = toolLabels[toolName] ?? label(toolName || '工具');
+  const title = (value: string) => theme.fg('toolTitle', theme.bold(value));
+  if (name === '$') return title(`$ ${text(row.command) || '…'}`) + (typeof row.timeout === 'number' ? theme.fg('muted', ` (timeout ${row.timeout}s)`) : '');
+  if (name === 'grep') return `${title('grep')} ${theme.fg('accent', `/${text(row.pattern)}/`)}${theme.fg('toolOutput', ` in ${text(row.path) || '.'}`)}`;
+  const target = text(row.path ?? row.paths ?? row.directory ?? row.url ?? row.query ?? row.pattern ?? row.title ?? row.name);
+  return target ? `${title(name)} ${theme.fg('accent', target)}` : title(name);
+}
+/** Readable key/value lines instead of raw JSON; nested values stay compact. */
+function describeFields(heading: string, value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (typeof value !== 'object') return [`${heading}：${String(value)}`];
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (!entries.length) return [];
+  const show = (item: unknown): string => {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const row = item as Record<string, unknown>;
+      if (row.truncated === true) return `（已截断，${row.characters ?? '?'} 字符）`;
+      if (row.type === 'text' && typeof row.characters === 'number') return `文本 ${row.characters} 字符${typeof row.lines === 'number' ? ` · ${row.lines} 行` : ''}`;
+      if (row.type === 'array' && typeof row.items === 'number') return `${row.items} 项`;
+      return JSON.stringify(item);
+    }
+    if (typeof item === 'string') return item.includes('\n') ? `\n${item.split('\n').map(line => `    ${line}`).join('\n')}` : item;
+    return Array.isArray(item) ? item.map(String).join(', ') : String(item);
+  };
+  return [`${heading}：`, ...entries.map(([key, item]) => `  ${key}：${show(item)}`)];
 }
 
 class Modal implements Component {

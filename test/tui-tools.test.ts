@@ -23,11 +23,21 @@ test('tool cards correlate run and call, preserve public arguments, and fold by 
     const expanded = card.region.render(100).map(stripTerminalSequences).join('');
     assert.equal([...expanded].filter(char => char === '漢').length, command.length); assert.ok(expanded.includes('进度'));
     send('run-1', { toolCallId: 'call', toolName: 'fixture', state: 'finished', summary: { bytes: 42 } });
-    assert.equal(target.toolCards.size, 1); assert.equal(card.data.state, 'finished'); assert.ok(card.region.render(100).join('').includes('结果统计'));
+    assert.equal(target.toolCards.size, 1); assert.equal(card.data.state, 'finished'); assert.ok(card.region.render(100).join('').includes('结果：')); assert.ok(card.region.render(100).join('').includes('bytes：42'));
     send('run-2', { toolCallId: 'call', toolName: 'fixture', state: 'running', args: { command: { truncated: true, characters: 20000 } } });
     assert.equal(target.toolCards.size, 2); const second = [...target.toolCards.values()][1]!;
     target.choose = async () => [...target.toolCards.keys()][1]; await target.toolActivity();
-    assert.ok(second.region.render(100).join('').includes('部分参数已截断'));
+    assert.ok(second.region.render(100).join('').includes('已截断，20000 字符'));
     target.choose = async () => key; await target.toolActivity(); assert.ok(!card.region.render(100).join('').includes('漢'));
   } finally { await app.stop(); }
+});
+
+test('folded tool lines follow Pi call renderers', async () => {
+  const { toolCallLine } = await import('../src/tui/index.js');
+  const plain = (text: string) => stripTerminalSequences(text);
+  assert.equal(plain(toolCallLine('mastra_workspace_execute_command', { command: 'ls  -la\nnext', timeout: 30 })), '$ ls -la next (timeout 30s)');
+  assert.equal(plain(toolCallLine('mastra_workspace_grep', { pattern: 'TODO', path: 'src' })), 'grep /TODO/ in src');
+  assert.equal(plain(toolCallLine('mastra_workspace_read_file', { path: 'README.md' })), 'read README.md');
+  assert.equal(plain(toolCallLine('web_fetch', { url: 'https://example.com' })), 'fetch https://example.com');
+  assert.equal(plain(toolCallLine('custom_tool', {})), 'custom_tool');
 });
