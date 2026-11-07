@@ -227,3 +227,21 @@ test('/export writes the public conversation as Markdown or JSONL without overwr
     assert.match(notes.at(-1)!, /export_private_path/);
   } finally { await app.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('/sessions lists the most recently active context first and marks the current one', async () => {
+  const contexts = [
+    { id: 'main', name: '主对话', role: 'main', archived: false, updatedAt: '2026-01-01T00:00:00Z' },
+    { id: 'chat.new', name: 'Newer', role: 'main', archived: false, updatedAt: '2026-01-02T00:00:00Z' },
+    { id: 'chat.child', name: 'Child', role: 'main', archived: false, parentContextId: 'main', updatedAt: '2026-01-03T00:00:00Z' },
+  ];
+  const client = { async request() { return { contexts }; } } as unknown as Client;
+  const app = new TerminalApp(client, 'main', new FakeTerminal());
+  const target = app as unknown as Omit<Internals, 'choose'> & { contexts(): Promise<void>; choose: (title: string, items: Array<{ value: string; label: string }>) => Promise<string | undefined> };
+  try {
+    let items: Array<{ value: string; label: string }> = [];
+    target.choose = async (_title, offered) => { items = offered; return undefined; };
+    await target.contexts();
+    assert.deepEqual(items.map(item => item.value), ['chat.new', 'main', 'chat.child']);
+    assert.match(items[1]!.label, /^✓ /); assert.match(items[2]!.label, /└─ Child/);
+  } finally { await app.stop(); }
+});

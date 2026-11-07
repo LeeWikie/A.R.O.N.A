@@ -730,6 +730,8 @@ export class Core {
       }
     }
     this.runtime.setSetting(`usage:${record.id}`, session.getTokenUsage());
+    // Recent activity orders context lists (Pi sorts sessions by latest activity).
+    try { this.runtime.updateContext(record.id, {}); } catch { /* Context removed during shutdown. */ }
     this.captures.delete(record.id); this.activeRuns.delete(record.id); this.memoryViews.delete(record.id); this.runViews.delete(record.id);
     this.ended.set(runId, reason); for (const resolve of this.waiters.get(runId) ?? []) resolve(reason); this.waiters.delete(runId);
     if (!this.stopping && reason === 'complete' && this.memoryEnabled() && this.store.db.prepare("SELECT 1 FROM signals WHERE run_id=? AND json_extract(body,'$.source')!='task-result' LIMIT 1").get(runId)) void this.queueMemory(runId).catch(() => {});

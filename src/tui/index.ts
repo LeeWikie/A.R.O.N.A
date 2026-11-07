@@ -95,7 +95,9 @@ const MAX_MESSAGE_ATTACHMENTS = 32 * 1024 * 1024;
 type Timing = { kind: 'once'; at: string } | { kind: 'interval'; anchorAt: string; everyMs: number } | { kind: 'cron'; expression: string };
 type SavedSchedule = { id: string; name: string; status: string; revision: number; task: string; nextFireAt: string | null; timing: Timing; timezone: string; contextId: string; output: { kind: string; contextId: string } };
 
-function contextTree(contexts: ContextRecord[]): Array<{ context: ContextRecord; depth: number }> {
+function contextTree(input: ContextRecord[]): Array<{ context: ContextRecord; depth: number }> {
+  // Most recently active first at every level, like Pi's session tree (latestActivity desc).
+  const contexts = [...input].sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
   const byId = new Map(contexts.map(item => [item.id, item])); const children = new Map<string, ContextRecord[]>();
   const roots: ContextRecord[] = [];
   for (const context of contexts) {
@@ -1290,7 +1292,7 @@ export class TerminalApp {
     const { contexts } = await this.request<{ contexts: ContextRecord[] }>('/contexts');
     const tree = contextTree(contexts);
     const sessions: SessionInfo[] = tree.map(({ context }) => ({ id: context.id, name: context.name, cwd: context.workspaceId ?? '', allMessagesText: context.purpose ?? '', modified: new Date(context.updatedAt ?? 0) }));
-    const choice = await this.choose('选择上下文', tree.map(({ context, depth }) => ({ value: context.id, label: `${depth ? `${'│ '.repeat(Math.min(depth - 1, 12))}└─ ` : ''}${context.name || context.id}`, description: `${context.id} · ${context.role === 'main' ? '交流' : '工作'}${context.parentContextId ? ` · 来源 ${context.parentContextId}` : ''}${context.archived ? ' · 已归档' : ''}` })), query => filterAndSortSessions(sessions, query, 'relevance').map(session => session.id));
+    const choice = await this.choose('选择上下文', tree.map(({ context, depth }) => ({ value: context.id, label: `${context.id === this.contextId ? '✓ ' : '  '}${depth ? `${'│ '.repeat(Math.min(depth - 1, 12))}└─ ` : ''}${context.name || context.id}`, description: `${context.updatedAt ? `${new Date(context.updatedAt).toLocaleString()} · ` : ''}${context.role === 'main' ? '交流' : '工作'}${context.parentContextId ? ` · 来源 ${context.parentContextId}` : ''}${context.archived ? ' · 已归档' : ''}` })), query => filterAndSortSessions(sessions, query, 'relevance').map(session => session.id));
     if (!choice) return;
     const context = contexts.find(x => x.id === choice); if (!context) return;
     const options: SelectItem[] = [{ value: 'open', label: context.role === 'main' ? '打开对话' : '查看只读历史' }, { value: 'details', label: '查看来源和用途' }, { value: 'rename', label: '重命名' }, { value: 'archive', label: context.archived ? '取消归档' : '归档' }];
