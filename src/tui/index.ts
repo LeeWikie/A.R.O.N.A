@@ -802,6 +802,7 @@ export class TerminalApp {
       }
       if (!this.seededHistory.has(context)) { for (const value of history.slice(-100)) this.editor.addToHistory(value); this.seededHistory.add(context); }
       this.contextReady = true;
+      if (this.coreChanged) { this.coreChanged = false; this.streamLost = false; this.transcript.addChild(new Text(theme.fg('warning', '核心已重启，已重新载入历史；重启前未完成的回复不会继续。'), 1, 0)); }
       const after = this.afterLoad; this.afterLoad = undefined; after?.();
       void this.presentApproval(); void this.refreshTasks();
       this.status('已连接'); void this.refreshQueue(); void this.connectStream(generation);
@@ -939,8 +940,11 @@ export class TerminalApp {
       if (!handshake.success || !['snapshot', 'event-stream', 'conversation-history', 'reply-stream'].every(capability => handshake.data.capabilities.includes(capability))) throw new AppError('incompatible_core_protocol');
       this.capabilities = new Set(handshake.data.capabilities);
       if (handshake.data.storageId !== this.storageId || handshake.data.instanceId !== this.instanceId) {
+        this.coreChanged = this.instanceId !== '' && handshake.data.instanceId !== this.instanceId;
         await this.loadContext(generation); return;
       }
+      // OpenClaw notes recovery in the transcript, not just the status line, so the gap is visible.
+      if (this.streamLost) { this.streamLost = false; this.transcript.addChild(new Text(theme.fg('success', '已重新连接；断开期间的事件已补齐。'), 1, 0)); }
       this.status(this.currentRunId ? '处理中' : '已连接');
       for await (const frame of this.client.events({ after: this.cursor, contextId: this.contextId, signal: controller.signal })) {
         if (this.stopped || generation !== this.generation) return;
@@ -951,10 +955,10 @@ export class TerminalApp {
           this.event(frame.event); this.cursor = frame.event.seq;
         }
       }
-      if (!this.stopped && generation === this.generation) { this.status('连接暂不可用，正在重试'); this.timer = setTimeout(() => void this.connectStream(generation), 2000); }
+      if (!this.stopped && generation === this.generation) { this.streamLost = true; this.status('连接暂不可用，正在重试'); this.timer = setTimeout(() => void this.connectStream(generation), 2000); }
     } catch {
       if (this.stopped || generation !== this.generation || controller.signal.aborted) return;
-      this.status('连接暂不可用，正在重试'); this.timer = setTimeout(() => void this.connectStream(generation), 2000);
+      this.streamLost = true; this.status('连接暂不可用，正在重试'); this.timer = setTimeout(() => void this.connectStream(generation), 2000);
     }
   }
   private switchContext(contextId: string) {
@@ -1020,6 +1024,8 @@ export class TerminalApp {
     this.ui.requestRender();
   }
   private lastCtrlC = 0;
+  private streamLost = false;
+  private coreChanged = false;
   /** Ctrl+Z, as in Pi: hand the terminal back to the shell; fg resumes. The core keeps running either way. */
   private suspend() {
     if (process.platform === 'win32') { this.note('Windows 不支持挂起到后台。'); return; }
