@@ -38,7 +38,11 @@ test('UI creates conversation, branches a verified turn, and treats work context
     const created = core.runtime.context(target.contextId); assert.equal(created?.role, 'main');
     const first = await core.submitMessage({ content: 'first fixture' }); await finished(core, first.runId!);
     const second = await core.submitMessage({ content: 'second fixture' }); await finished(core, second.runId!);
+    const offered: Array<Array<{ value: string; label: string }>> = []; const plain = target.choose;
+    target.choose = (async (_title: string, items: Array<{ value: string; label: string }>) => { offered.push(items); return plain(); }) as typeof target.choose;
     choices = [first.runId!, 'full', 'yes']; prompts = ['Branch fixture']; await target.branchContext(core.runtime.context('main')!);
+    assert.equal(offered[0]!.find(item => item.value === first.runId)?.label, 'first fixture', 'turns are offered by what the user said');
+    target.choose = plain;
     const branch = core.runtime.context(target.contextId)!; assert.equal(branch.parentContextId, 'main'); assert.equal(branch.parentRunId, first.runId);
     const history = conversationPage(core, branch.id).messages; assert.ok(history.some(message => message.content === 'first fixture' && message.originContextId === 'main')); assert.ok(!history.some(message => message.content === 'second fixture'));
     await until(() => terminal.output, text => text.includes('来自上下文 main'));

@@ -56,6 +56,8 @@ export const tuiCommands: readonly TuiCommand[] = [
   { name: 'new', description: '新建交流上下文', usage: '/new [名称]' },
   { name: 'sessions', description: '切换上下文', usage: '/sessions [ID或名称]', aliases: ['session', 'resume'] },
   { name: 'name', description: '重命名当前上下文', usage: '/name [名称]' },
+  { name: 'fork', description: '从已完成的一轮分支出新对话', capability: 'context-branch' },
+  { name: 'tree', description: '按来源浏览上下文树' },
   { name: 'model', description: '切换模型', usage: '/model [配置ID或名称]', aliases: ['models'] },
   { name: 'think', description: '设置思考等级', usage: '/think <等级|default>', aliases: ['thinking'], completions: [...thinkingCommandLevels, 'default'] },
   { name: 'stop', description: '停止当前运行', aliases: ['abort'], capability: 'foreground-interrupt' },
@@ -1019,6 +1021,13 @@ export class TerminalApp {
           if (!value?.trim()) return;
           await this.write(`/contexts/${routeId(this.contextId)}`, { name: value.trim() }, 'PATCH'); this.note('上下文已更新。'); return;
         }
+        case 'fork': {
+          const { contexts } = await this.request<{ contexts: ContextRecord[] }>('/contexts');
+          const current = contexts.find(context => context.id === this.contextId);
+          if (!current || current.role !== 'main' || current.archived) { this.note('只能从交流上下文分支。'); return; }
+          await this.branchContext(current); return;
+        }
+        case 'tree': await this.contexts(); return;
         case 'model': {
           if (!arg) { await this.models(); return; }
           const { models } = await this.request<{ models: Array<{ id: string; name: string; modelId: string }> }>('/models');
@@ -1164,9 +1173,9 @@ export class TerminalApp {
   private async branchContext(source: ContextRecord) {
     const snapshot = await this.client.snapshot(source.id, this.lifetime.signal);
     const known = new Map<string, RunRecord>((snapshot.runs ?? []).map(run => [run.id, run]));
-    let page = snapshot.conversation; const referenced = new Set<string>();
+    let page = snapshot.conversation; const referenced = new Set<string>(); const prompts = new Map<string, string>();
     for (;;) {
-      for (const message of page.messages) if (message.runId) referenced.add(message.runId);
+      for (const message of page.messages) if (message.runId) { referenced.add(message.runId); if (message.role === 'user' && !prompts.has(message.runId)) prompts.set(message.runId, message.content); }
       if (!page.hasMore) break;
       if (!page.nextCursor) throw new AppError('invalid_history_cursor');
       const cursor = page.nextCursor; page = await this.client.conversation(source.id, cursor, this.lifetime.signal);
@@ -1182,14 +1191,16 @@ export class TerminalApp {
     }
     const runs = [...known.values()].filter(run => run.contextId === source.id && run.status === 'succeeded').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     if (!runs.length) { this.note('没有可分支的已成功运行。'); return; }
-    const sourceRunId = await this.choose('选择已完成轮次（最近运行及有对话记录的历史运行）', runs.map(run => ({ value: run.id, label: run.finishedAt ?? run.createdAt, description: run.id }))); if (!sourceRunId) return;
+    // Like Pi /fork: pick a turn by what you said, not by an internal id.
+    const turn = (run: RunRecord) => ({ value: run.id, label: label(prompts.get(run.id) ?? '（无用户消息的运行）').slice(0, 120), description: new Date(run.finishedAt ?? run.createdAt).toLocaleString() });
+    const sourceRunId = await this.choose('从哪一轮之后分支（含该轮）', runs.map(turn)); if (!sourceRunId) return;
     const scope = await this.choose('派生范围', [{ value: 'full', label: '从最早记录到所选轮次' }, { value: 'range', label: '选择起止轮次的工作集' }]); if (!scope) return;
     let fromRunId: string | undefined;
     if (scope === 'range') {
-      fromRunId = await this.choose('选择起始的已成功轮次（不得晚于结束轮次）', runs.map(run => ({ value: run.id, label: run.finishedAt ?? run.createdAt, description: run.id })));
+      fromRunId = await this.choose('选择起始轮次（不得晚于结束轮次）', runs.map(turn));
       if (!fromRunId) return;
     }
-    const name = await this.prompt('新对话名称'); if (!name?.trim()) return;
+    const name = await this.prompt('新对话名称', `${label(source.name)} 分支`); if (!name?.trim()) return;
     const description = scope === 'range' ? '只复制选定的完整轮次作为派生工作集；源上下文原文完整保留。不是摘要或记忆整理，不会继承任务、审批或授权。' : '复制该轮次之前的对话；不会继承在途任务、审批或授权。';
     const confirm = await this.choose(description, [{ value: 'no', label: '返回' }, { value: 'yes', label: '创建分支' }]);
     if (confirm !== 'yes') return;
