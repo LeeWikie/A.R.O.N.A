@@ -34,11 +34,11 @@ test('chat and context management drive backend and cleanly stop', async () => {
       requests.push(route);
       if (init?.body) writes.push({ route, body: JSON.parse(String(init.body)) as unknown });
       if (route === '/protocol') return { protocolVersion: 1, instanceId: '00000000-0000-4000-8000-000000000001', storageId: '00000000-0000-4000-8000-000000000002', capabilities: ['snapshot', 'event-stream', 'conversation-history', 'reply-stream', 'message-queue', 'provider-auth', 'foreground-interrupt', 'context-branch', 'web-tools', 'attachments'] };
-      if (route.startsWith('/snapshot?')) { const contextId = new URL(route, 'http://localhost').searchParams.get('contextId'); return { protocolVersion: 1, instanceId: '00000000-0000-4000-8000-000000000001', storageId: '00000000-0000-4000-8000-000000000002', watermark: 0, selectedContextId: contextId, contexts: [{ id: contextId, role: 'main' }], runs: [], conversation: { messages: [], nextCursor: null, hasMore: false }, approvals: [{ id: 'approval-1', contextId: 'other', toolName: 'write_file', args: { path: 'file.txt' }, status: 'pending' }] }; }
+      if (route.startsWith('/snapshot?')) { const contextId = new URL(route, 'http://localhost').searchParams.get('contextId'); return { protocolVersion: 1, instanceId: '00000000-0000-4000-8000-000000000001', storageId: '00000000-0000-4000-8000-000000000002', watermark: 0, selectedContextId: contextId, contexts: [{ id: contextId, role: 'main' }], runs: [], conversation: { messages: [], nextCursor: null, hasMore: false }, approvals: writes.some(x => x.route === '/approvals/approval-1') ? [] : [{ id: 'approval-1', contextId: 'other', toolName: 'write_file', args: { path: 'file.txt' }, status: 'pending', createdAt: '2026-01-01T00:00:00Z' }] }; }
       if (route.startsWith('/event-page?')) return { events: [], nextCursor: 0, hasMore: false };
       if (route === '/messages') { const body = JSON.parse(String(init?.body)) as { content: string; contextId: string }; submissions.push([body.content, body.contextId]); return { status: 'accepted' }; }
       if (route === '/contexts') return { contexts: [{ id: 'other', name: '其他', archived: false }] };
-      if (route === '/approvals') return { approvals: [{ id: 'approval-1', contextId: 'other', toolName: 'write_file', args: { path: 'file.txt' }, status: 'pending' }] };
+      if (route === '/approvals') return { approvals: writes.some(x => x.route === '/approvals/approval-1') ? [] : [{ id: 'approval-1', contextId: 'other', toolName: 'write_file', args: { path: 'file.txt' }, status: 'pending', createdAt: '2026-01-01T00:00:00Z' }] };
       if (route === '/approvals/approval-1') return {};
       if (route === '/models') return { models: [{ id: 'profile-1', name: 'Fixture', modelId: 'model', thinking: {} }] };
       if (route === '/credentials') return { credentials: [] };
@@ -59,6 +59,10 @@ test('chat and context management drive backend and cleanly stop', async () => {
   const app = new TerminalApp(client, 'main', terminal);
   try {
     const running = app.run(); await wait();
+    // A pending approval in any context is presented at once; 1 = approve this call.
+    assert.ok(terminal.output.includes('需要审批'));
+    terminal.send('1'); await wait();
+    assert.deepEqual(writes.find(x => x.route === '/approvals/approval-1')?.body, { decision: 'approve', scope: 'once' });
     terminal.send('hello\r'); await wait();
     assert.deepEqual(submissions, [['hello', 'main']]);
     terminal.send('/menu\r'); await wait();
@@ -68,9 +72,6 @@ test('chat and context management drive backend and cleanly stop', async () => {
     terminal.send('\r'); await wait();
     terminal.send('next\r'); await wait();
     assert.deepEqual(submissions, [['hello', 'main'], ['next', 'other']]);
-    terminal.send('/menu\r'); await wait(); terminal.send('审批\r'); await wait(); terminal.send('\r'); await wait();
-    terminal.send('同意\r'); await wait(); terminal.send('\r'); await wait(); terminal.send('\r'); await wait();
-    assert.deepEqual(writes.find(x => x.route === '/approvals/approval-1')?.body, { decision: 'approve', scope: 'once' });
     terminal.send('/menu\r'); await wait(); terminal.send('切换模型\r'); await wait(); terminal.send('\r'); await wait(); terminal.send('\r'); await wait();
     assert.deepEqual(writes.find(x => x.route === '/contexts/other/model')?.body, { profileId: 'profile-1' });
     terminal.send('/menu\r'); await wait(); terminal.send('凭据\r'); await wait(); terminal.send('\r'); await wait(); terminal.send('FIXTURE_KEY\r'); await wait(); terminal.send('fixture-secret\r'); await wait();

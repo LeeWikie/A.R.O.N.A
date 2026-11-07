@@ -85,9 +85,11 @@ export function activeDrafts(core:Core,contextId:string){
   }
   return [...drafts.values()];
 }
+/** Approvals as clients may see them: no capability key, secrets redacted from arguments. */
+export function publicApprovals(core: Core) { return core.runtime.approvals().map(({ capabilityKey: _, args, ...row }) => ({ ...row, args: safeArgs(core, args) })); }
 export function snapshot(core: Core, contextId = 'main'): TuiSnapshot {
   const watermark = core.runtime.eventHead();
-  const approvals = core.runtime.approvals().map(({ capabilityKey: _, args, ...row }) => ({ ...row, args: safeArgs(core, args) }));
+  const approvals = publicApprovals(core);
   const runs = core.store.db.prepare('SELECT id FROM runs WHERE context_id=? ORDER BY created_at DESC LIMIT 100').all(contextId).map(row => core.store.getRun(String(row.id))!);
   return { protocolVersion: 1, instanceId: core.instanceId, storageId: core.storageId, watermark, selectedContextId: contextId,queuedMessages:core.queuedMessages(contextId),toolActivity:toolActivity(core,contextId),capacity:core.contextPolicy.view(contextId),drafts:activeDrafts(core,contextId), contexts: core.runtime.contexts(), tasks: core.runtime.tasks().map(safeTask), approvals, conversation: conversationPage(core, contextId), runs, models: core.models.list(), workspaces: core.capabilities.roots(), notifications: core.runtime.pendingNotifications() };
 }

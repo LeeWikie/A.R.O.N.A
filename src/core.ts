@@ -744,6 +744,16 @@ export class Core {
     if(task&&!this.runtime.approvals().some(x=>x.id!==id&&x.taskId===task.id&&x.status==='pending'))this.runtime.updateTask(task.id,{status:'running'});
     return {id,status:decision==='approve'?'approved':'declined'};
   }
+  /** Effective model selection for the next request; `source` tells session override from profile default. */
+  async modelState(contextId: string) {
+    const record = this.runtime.context(contextId); if (!record) throw new AppError('context_not_found', 404);
+    const session = await this.sessions.get(record);
+    const profileId = session.model.get() || record.modelProfile;
+    const override = (session.state.get() as {thinkingLevel?:ThinkingLevel}).thinkingLevel;
+    const profile = this.models.list().find(row => row.id === profileId) as {name?:string;modelId?:string;defaultThinkingLevel?:ThinkingLevel}|undefined;
+    const thinkingLevel = override ?? profile?.defaultThinkingLevel ?? null;
+    return { contextId, profileId, name: profile?.name ?? profileId, modelId: profile?.modelId ?? null, thinkingLevel, source: override ? 'session' as const : thinkingLevel ? 'profile' as const : 'provider-default' as const };
+  }
   async switchModel(contextId: string, profileId: string, thinkingLevel?: ThinkingLevel|null) {
     if (profileId !== 'default' || !this.options.model) this.models.resolve(profileId);
     this.models.validateThinking(profileId, thinkingLevel??undefined); const record = this.runtime.context(contextId); if (!record) throw new AppError('context_not_found', 404);

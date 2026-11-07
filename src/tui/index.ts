@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   Box, Container, Editor, Input, Markdown, ProcessTerminal, ScrollView, SelectList, Spacer, CombinedAutocompleteProvider, Image, MouseRegion, getCapabilities, getNativeClipboard,
-  Text, TruncatedText, TuiAltScreen, VStack, stripTerminalSequences, matchesKey, Key, CURSOR_MARKER, truncateToWidth,
+  Text, TruncatedText, TuiAltScreen, VStack, wrapTextWithAnsi, stripTerminalSequences, matchesKey, Key, CURSOR_MARKER, truncateToWidth,
   type Component, type EditorTheme, type MarkdownTheme, type OverlayHandle, type SelectItem, type AutocompleteProvider, type AutocompleteItem,
   type SelectListTheme, type Terminal, type TuiMouseEvent, type NativeClipboard,
 } from '@earendil-works/pi-tui';
@@ -22,11 +22,15 @@ import { editExternally } from './upstream/external-editor.js';
 import { filterAndSortSessions, type SessionInfo } from './upstream/session-selector-search.js';
 import { protocolHandshakeSchema } from '../protocol.js';
 import { findFd } from '../tools/fd.js';
+import { colorEnabled, detectAppearance, plainTheme, Theme } from './upstream/theme.js';
 
 const identity = (s: string) => s;
-const selectTheme: SelectListTheme = { selectedPrefix: identity, selectedText: identity, description: identity, scrollInfo: identity, noMatch: identity };
-const editorTheme: EditorTheme = { borderColor: identity, selectList: selectTheme };
-const markdownTheme: MarkdownTheme = { heading: identity, link: identity, linkUrl: identity, code: identity, codeBlock: identity, codeBlockBorder: identity, quote: identity, quoteBorder: identity, hr: identity, listBullet: identity, bold: identity, italic: identity, strikethrough: identity, underline: identity };
+// Module-level theme so free functions and components share one palette; set per app instance.
+let theme: Theme = plainTheme;
+let selectTheme: SelectListTheme = theme.selectList();
+let editorTheme: EditorTheme = theme.editor();
+let markdownTheme: MarkdownTheme = theme.markdown();
+function applyTheme(next: Theme) { theme = next; selectTheme = next.selectList(); editorTheme = next.editor(); markdownTheme = next.markdown(); }
 
 /** Server-controlled text must never supply terminal controls or bidi overrides. */
 export function safeTerminalText(value: string): string {
@@ -74,7 +78,7 @@ export const tuiCommands: readonly TuiCommand[] = [
 ];
 function commandHelp() {
   return ['可用命令：', ...tuiCommands.map(command => `  ${command.usage ?? `/${command.name}`}  ${command.description}${command.aliases?.length ? `（别名 ${command.aliases.map(alias => `/${alias}`).join(' ')}）` : ''}`),
-    '快捷键：Ctrl+C 清空输入／停止运行／退出 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
+    '快捷键：Ctrl+C 清空输入／停止运行／退出 · Shift+Tab 切换思考等级 · Alt+Enter（或 Ctrl+Q）排队到下一次运行 · Alt+↑（或 Alt+Q）撤回并编辑排队消息 · Ctrl+G 外部编辑器 · Ctrl+V 粘贴附件 · Ctrl+X 复制 · PageUp/PageDown 浏览'].join('\n');
 }
 const supportedLevels = (levels: readonly string[]) => levels.filter(level => ['off', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level));
 type SavedProfile = { id: string; name: string; modelId: string; defaultThinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' } & ({ providerId: string } | { protocol: 'chat-completions' | 'responses' | 'messages'; baseURL: string; apiKeyEnv: string; authHeader: 'api-key' | 'bearer'; thinking: Record<string, Record<string, unknown>> });
@@ -175,14 +179,16 @@ class ToolCard extends Container {
   toggle() { this.expanded = !this.expanded; this.rebuild(); this.renderNow(); }
   private rebuild() {
     const state: Record<string, string> = { running: '进行中', finished: '完成', failed: '失败', denied: '已拒绝' };
-    this.title.setText(`${this.expanded ? '▾' : '▸'} ${label(this.data.toolName || '工具')} · ${state[this.data.state] ?? label(this.data.state)}${this.data.originContextId ? ` · 来自 ${label(this.data.originContextId)}` : ''}`);
+    const bg = this.data.state === 'running' ? 'toolPendingBg' : this.data.state === 'finished' ? 'toolSuccessBg' : 'toolErrorBg';
+    const paint = (text: string) => theme.bg(bg, text); this.title.setCustomBgFn(paint); this.detail.setCustomBgFn(paint);
+    this.title.setText(`${theme.fg('muted', this.expanded ? '▾' : '▸')} ${theme.fg('toolTitle', theme.bold(label(this.data.toolName || '工具')))} ${theme.fg('muted', `· ${state[this.data.state] ?? label(this.data.state)}`)}${this.data.originContextId ? theme.fg('muted', ` · 来自 ${label(this.data.originContextId)}`) : ''}`);
     this.clear(); this.addChild(this.title);
     if (this.expanded) {
       const args = this.data.args === undefined ? '未提供' : JSON.stringify(this.data.args, null, 2);
       const progress = this.data.progress === undefined ? '' : `\n进度：\n${JSON.stringify(this.data.progress, null, 2)}`;
       const summary = this.data.summary === undefined ? '' : `\n结果统计：\n${JSON.stringify(this.data.summary, null, 2)}`;
       const truncated = /"truncated"\s*:\s*true/.test(args ?? '') ? '\n部分参数已截断。' : '';
-      this.detail.setText(safeTerminalText(`参数：\n${args}${truncated}${progress}${summary}${this.data.legacy ? '\n旧记录不包含公开参数。' : ''}`)); this.addChild(this.detail);
+      this.detail.setText(theme.fg('toolOutput', safeTerminalText(`参数：\n${args}${truncated}${progress}${summary}${this.data.legacy ? '\n旧记录不包含公开参数。' : ''}`))); this.addChild(this.detail);
     }
   }
 }
@@ -200,6 +206,63 @@ class Modal implements Component {
   }
 }
 
+export type ApprovalChoice = 'once' | 'task' | 'duty' | 'decline' | 'later';
+const approvalLabels: Record<ApprovalChoice, string> = { once: '同意此次', task: '同意，并在此任务内放行同类调用', duty: '同意，并在此定时职责内放行', decline: '拒绝', later: '稍后处理' };
+const APPROVAL_PAGE = 10;
+function approvalError(error: unknown) {
+  const code = error instanceof AppError ? error.code : 'request_failed';
+  return ({ approval_not_active: '该请求已失效（运行已结束或已被处理）', approval_not_pending: '该请求已被处理', approval_target_changed: '目标配置已变化，请在新的请求中重新审批', approval_scope_not_available: '所选授权范围不适用于此请求' } as Record<string, string>)[code] ?? label(code);
+}
+/** One-line summary of what the tool will touch, for the prompt title. */
+export function approvalTarget(args: unknown) {
+  if (!args || typeof args !== 'object') return '';
+  const row = args as Record<string, unknown>;
+  for (const key of ['command', 'path', 'url', 'query', 'paths', 'directory', 'pattern']) {
+    const value = row[key]; if (value === undefined) continue;
+    return Array.isArray(value) ? value.map(String).join(', ') : String(value);
+  }
+  return '';
+}
+/**
+ * Pure key dispatch for the approval prompt (after Hermes prompts.tsx approvalAction): digits pick,
+ * Enter confirms, ↑↓ move, v pages a long request. Esc postpones instead of denying: a decline here is final.
+ */
+export function approvalKey(data: string, selected: number, options: readonly ApprovalChoice[]): { kind: 'choose'; choice: ApprovalChoice } | { kind: 'move'; delta: -1 | 1 } | { kind: 'page' } | { kind: 'noop' } {
+  if (matchesKey(data, Key.escape)) return { kind: 'choose', choice: 'later' };
+  if (/^[1-9]$/.test(data) && Number(data) <= options.length) return { kind: 'choose', choice: options[Number(data) - 1]! };
+  if (matchesKey(data, Key.enter)) return { kind: 'choose', choice: options[selected]! };
+  if (data === 'v' || data === 'V') return { kind: 'page' };
+  if (matchesKey(data, Key.up) && selected > 0) return { kind: 'move', delta: -1 };
+  if (matchesKey(data, Key.down) && selected < options.length - 1) return { kind: 'move', delta: 1 };
+  return { kind: 'noop' };
+}
+class ApprovalPrompt implements Component {
+  focused = false; selected = 0; page = 0;
+  constructor(private readonly title: string, private readonly body: string[], readonly options: readonly ApprovalChoice[], private readonly done: (choice: ApprovalChoice) => void, private readonly redraw: () => void) {}
+  invalidate() {}
+  render(width: number) {
+    const inner = Math.max(20, width - 4);
+    const wrapped = this.body.flatMap(line => wrapTextWithAnsi(line, inner));
+    const pages = Math.max(1, Math.ceil(wrapped.length / APPROVAL_PAGE)); const start = (this.page % pages) * APPROVAL_PAGE;
+    const lines = [theme.fg('warning', theme.bold(truncateToWidth(this.title, inner))), ...wrapped.slice(start, start + APPROVAL_PAGE).map(line => `  ${line}`)];
+    if (pages > 1) lines.push(theme.fg('warning', `  第 ${start + 1}–${Math.min(wrapped.length, start + APPROVAL_PAGE)} 行，共 ${wrapped.length} 行 · v 翻页`));
+    lines.push('');
+    this.options.forEach((option, index) => {
+      const text = `${index === this.selected ? '▸ ' : '  '}${index + 1}. ${approvalLabels[option]}`;
+      lines.push(index === this.selected ? theme.fg('accent', text) : theme.fg(option === 'decline' ? 'error' : 'muted', text));
+    });
+    lines.push(theme.fg('dim', `↑↓ 选择 · Enter 确认 · 1-${this.options.length} 快选 · Esc 稍后处理`));
+    const border = theme.fg('warning', '│');
+    return [theme.fg('warning', `╭${'─'.repeat(Math.max(0, width - 2))}╮`), ...lines.map(line => `${border} ${truncateToWidth(line, width - 4, '…', true)} ${border}`), theme.fg('warning', `╰${'─'.repeat(Math.max(0, width - 2))}╯`)];
+  }
+  handleInput(data: string) {
+    const action = approvalKey(data, this.selected, this.options);
+    if (action.kind === 'choose') this.done(action.choice);
+    else if (action.kind === 'move') { this.selected += action.delta; this.redraw(); }
+    else if (action.kind === 'page') { this.page++; this.redraw(); }
+  }
+}
+
 /** Interactive terminal client. Only server-authorized messages are rendered in the transcript. */
 export class TerminalApp {
   private readonly ui: TuiAltScreen;
@@ -209,6 +272,93 @@ export class TerminalApp {
   private readonly footer = new Text('', 1, 0);
   private readonly queuePreview = new Container();
   private readonly userRows = new Map<string, { view: Text; status: string }>();
+  private pendingApprovals: ApprovalRecord[] = [];
+  private readonly postponedApprovals = new Set<string>();
+  private approvalOpen?: string;
+  private approvalVersion = 0;
+  private approvalDeferred = false;
+  private async refreshApprovals() {
+    const version = ++this.approvalVersion;
+    try {
+      const { approvals } = await this.request<{ approvals: ApprovalRecord[] }>('/approvals', { signal: this.lifetime.signal });
+      if (this.stopped || version !== this.approvalVersion) return;
+      this.pendingApprovals = approvals.filter(row => row.status === 'pending');
+      for (const id of this.postponedApprovals) if (!this.pendingApprovals.some(row => row.id === id)) this.postponedApprovals.delete(id);
+      if (this.approvalOpen && !this.pendingApprovals.some(row => row.id === this.approvalOpen)) this.pendingModal?.();
+      this.status(this.statusText); void this.presentApproval();
+    } catch { /* The stream reports connection state; a later state event retries. */ }
+  }
+  /** Open the oldest unhandled approval, but never over another dialog or a half-typed message. */
+  private async presentApproval() {
+    if (this.stopped || !this.started || this.approvalOpen || this.ui.hasOverlay()) return;
+    if (this.editor.getText().trim()) { this.approvalDeferred = true; return; }
+    // Current context first, then background work in arrival order: delegated tasks wait on the user here.
+    const open = this.pendingApprovals.filter(row => !this.postponedApprovals.has(row.id)).sort((a, b) => Number(b.contextId === this.contextId) - Number(a.contextId === this.contextId) || a.createdAt.localeCompare(b.createdAt));
+    const approval = open[0];
+    if (!approval) return;
+    this.approvalOpen = approval.id;
+    try { await this.decideApproval(approval); }
+    catch (error) { if (!this.stopped) this.note(`审批未完成：${approvalError(error)}`); }
+    finally { this.approvalOpen = undefined; }
+    void this.presentApproval();
+  }
+  private async decideApproval(approval: ApprovalRecord) {
+    const task = approval.taskId ? await this.request<TaskRecord>(`/tasks/${routeId(approval.taskId)}`).catch(() => undefined) : undefined;
+    this.approvalDeferred = false;
+    const options: ApprovalChoice[] = ['once', ...(task ? ['task' as const] : []), ...(task?.occurrenceId ? ['duty' as const] : []), 'decline', 'later'];
+    const target = approvalTarget(approval.args);
+    const body = [
+      theme.fg('muted', `上下文 ${label(approval.contextId)}${task ? ` · 任务 ${label(task.title)}` : ''}`),
+      ...(target ? [theme.fg('text', safeTerminalText(target))] : []),
+      theme.fg('dim', '完整参数：'),
+      ...safeTerminalText(JSON.stringify(approval.args, null, 2) ?? '').split('\n').map(line => theme.fg('toolOutput', line)),
+    ];
+    const choice = await this.approvalPrompt(`需要审批 · ${label(approval.toolName)}`, body, options);
+    if (!choice || choice === 'later') { this.postponedApprovals.add(approval.id); this.note(`已暂缓审批 ${label(approval.toolName)}；/approvals 可随时处理。`); this.status(this.statusText); return; }
+    const decision = choice === 'decline' ? 'decline' : 'approve';
+    const scope = choice === 'decline' ? 'once' : choice;
+    await this.write(`/approvals/${routeId(approval.id)}`, { decision, scope });
+    this.pendingApprovals = this.pendingApprovals.filter(row => row.id !== approval.id);
+    this.note(decision === 'approve' ? `已同意 ${label(approval.toolName)}${scope === 'once' ? '' : `（${approvalLabels[choice].replace(/^同意，并/, '')}）`}。` : `已拒绝 ${label(approval.toolName)}。`);
+    this.status(this.statusText);
+  }
+  private approvalPrompt(title: string, body: string[], options: readonly ApprovalChoice[]): Promise<ApprovalChoice | undefined> {
+    if (this.stopped) return Promise.resolve(undefined);
+    return new Promise(resolve => {
+      let handle: OverlayHandle;
+      const finish = (value?: ApprovalChoice) => { if (this.pendingModal !== cancel) return; this.pendingModal = undefined; this.overlays.closeOverlay(handle); resolve(value); };
+      const cancel = () => finish(); this.pendingModal = cancel;
+      const prompt = new ApprovalPrompt(title, body, options, finish, () => this.ui.requestRender());
+      handle = this.overlays.openOverlay(prompt, { width: '90%', maxHeight: '80%', margin: 1 });
+    });
+  }
+  private model?: { profileId: string; name: string; modelId: string | null; thinkingLevel: string | null; source: 'session' | 'profile' | 'provider-default' };
+  private modelVersion = 0;
+  private async refreshModel() {
+    const context = this.contextId; const version = ++this.modelVersion;
+    try {
+      const state = await this.request<NonNullable<TerminalApp['model']>>(`/contexts/${routeId(context)}/model`, { signal: this.contextController.signal });
+      if (this.stopped || context !== this.contextId || version !== this.modelVersion) return;
+      this.model = state; this.editor.borderColor = text => theme.thinking(state.thinkingLevel ?? 'off', text); this.status(this.statusText);
+    } catch { /* Older cores have no model endpoint; the footer simply omits the model. */ }
+  }
+  /** Shift+Tab, as in Pi: step through the levels the current model supports and apply to later requests. */
+  private async cycleThinking() {
+    if (!this.model || !this.isMainContext) { this.note('当前上下文无法切换思考等级。'); return; }
+    const { models } = await this.request<{ models: Array<{ id: string; modelId: string; providerId?: string; thinking?: Record<string, unknown> }> }>('/models');
+    const profile = models.find(row => row.id === this.model!.profileId);
+    let levels = Object.keys(profile?.thinking ?? {});
+    if (profile?.providerId) {
+      const catalog = await this.request<{ models: Array<{ modelId: string; thinkingLevels?: string[] }> }>(`/provider-models?provider=${routeId(profile.providerId)}`);
+      levels = catalog.models.find(entry => entry.modelId === profile.modelId)?.thinkingLevels ?? [];
+    }
+    levels = supportedLevels(levels);
+    if (levels.length < 2) { this.note('当前模型不支持切换思考等级。'); return; }
+    const current = this.model.thinkingLevel ?? 'off';
+    const next = levels[(levels.indexOf(current) + 1) % levels.length]!;
+    await this.write(`/contexts/${routeId(this.contextId)}/model`, { profileId: this.model.profileId, thinkingLevel: next });
+    await this.refreshModel(); this.note(`思考等级：${next}（用于后续请求）`);
+  }
   private setUserState(row: { view: Text; status: string }, status: string) {
     if (row.status === status) return;
     row.status = status; row.view.setText(userMessageState(status)); this.ui.requestRender();
@@ -257,7 +407,8 @@ export class TerminalApp {
   private done!: () => void;
   private readonly completion = new Promise<void>(resolve => { this.done = resolve; });
 
-  constructor(private readonly client: Client, contextId = 'main', terminal: Terminal = new ProcessTerminal(), options: { completionBase?: string; fdPath?: string; clipboard?: NativeClipboard } = {}) {
+  constructor(private readonly client: Client, contextId = 'main', terminal: Terminal = new ProcessTerminal(), options: { completionBase?: string; fdPath?: string; clipboard?: NativeClipboard; theme?: Theme } = {}) {
+    applyTheme(options.theme ?? (terminal instanceof ProcessTerminal && colorEnabled() ? new Theme(detectAppearance()) : plainTheme));
     this.contextId = contextId;
     this.clipboard = options.clipboard;
     this.ui = new TuiAltScreen(terminal, true, undefined, { mouse: true, copyOnSelect: false, copySelection: async text => {
@@ -276,6 +427,7 @@ export class TerminalApp {
       // Same defaults as Pi: Alt+Enter queues a follow-up, Alt+Up restores queued input (Ctrl+Q / Alt+Q where Alt is taken).
       if (!this.editor.isShowingAutocomplete() && (matchesKey(data, Key.alt('enter')) || matchesKey(data, Key.ctrl('q')))) { void this.followUp(); return { consume: true }; }
       if (matchesKey(data, Key.alt('up')) || matchesKey(data, Key.alt('q'))) { void this.restoreQueue(); return { consume: true }; }
+      if (matchesKey(data, Key.shift('tab')) && !this.editor.isShowingAutocomplete()) { void this.cycleThinking().catch(error => { if (!this.stopped) this.note(`切换失败：${label(error instanceof AppError ? error.code : 'request_failed')}`); }); return { consume: true }; }
       if (!matchesKey(data, Key.ctrl('c'))) return undefined;
       if (this.ui.hasActiveSelection()) { void this.copySelection(); return { consume: true }; }
       if (this.editor.getText()) { this.editor.setText(''); this.ui.requestRender(); }
@@ -294,7 +446,9 @@ export class TerminalApp {
       ...(command.completions ? { getArgumentCompletions: (prefix: string) => command.completions!.filter(value => value.startsWith(prefix.toLowerCase())).map(value => ({ value, label: value })) } : {}) }));
     const supported = (name: string) => { const command = tuiCommands.find(entry => entry.name === name); return !command?.capability || this.capabilities.has(command.capability); };
     editor.setAutocompleteProvider(new SafeAutocomplete(new CombinedAutocompleteProvider(commands, this.completionBase, this.completionFdPath), this.completionBase, supported));
-    editor.onSubmit = text => { void this.submit(text); }; return editor;
+    editor.onSubmit = text => { void this.submit(text).finally(() => { if (this.approvalDeferred) void this.presentApproval(); }); };
+    editor.onChange = text => { if (!text.trim() && this.approvalDeferred) void this.presentApproval(); };
+    return editor;
   }
   private mountEditor() {
     this.ui.setLayoutRoot(new VStack([this.header, { component: this.scroll, grow: 1, minSize: 1 }, this.queuePreview, this.footer, this.editor]));
@@ -327,12 +481,15 @@ export class TerminalApp {
   }
   private status(text: string) {
     this.statusText = text;
-    this.header.setText(`ShittimChest  ·  ${label(this.contextId)}${this.contextRole && this.contextRole !== 'main' ? ' · 只读工作上下文' : ''}${this.workingSet ? ' · 派生工作集' : ''}`);
+    this.header.setText(`${theme.fg('accent', theme.bold('ShittimChest'))}${theme.fg('dim', '  ·  ')}${label(this.contextId)}${this.contextRole && this.contextRole !== 'main' ? theme.fg('warning', ' · 只读工作上下文') : ''}${this.workingSet ? theme.fg('muted', ' · 派生工作集') : ''}`);
     const attachmentCount = this.pendingAttachments.get(this.contextId)?.length ?? 0;
-    this.footer.setText(`${label(text)}${this.capacityText ? `  ·  ${this.capacityText}` : ''}${this.usageText ? `  ·  ${this.usageText}` : ''}${this.queueCount ? `  ·  队列 ${this.queueCount}` : ''}${attachmentCount ? `  ·  待发送附件 ${attachmentCount}` : ''}  ·  /help 命令  /menu 管理  /quit 退出  ·  PageUp/PageDown 浏览`);
+    const tone = /错误|失败|断开/.test(text) ? 'error' : /处理中|连接中|重连/.test(text) ? 'warning' : 'success';
+    const model = this.model ? `${label(this.model.name)} • ${this.model.thinkingLevel ? label(this.model.thinkingLevel) : '思考：供应商默认'}` : '';
+    const parts = [theme.fg(tone, label(text)), this.capacityText && theme.fg('dim', this.capacityText), this.usageText && theme.fg('dim', this.usageText), this.queueCount ? theme.fg('warning', `队列 ${this.queueCount}`) : '', attachmentCount ? theme.fg('dim', `待发送附件 ${attachmentCount}`) : '', this.pendingApprovals.length ? theme.fg('warning', `待审批 ${this.pendingApprovals.length}`) : '', model && theme.thinking(this.model?.thinkingLevel ?? 'off', model)].filter(Boolean);
+    this.footer.setText(`${parts.join(theme.fg('dim', '  ·  '))}\n${theme.fg('dim', '/help 命令  /menu 管理  /quit 退出  ·  Shift+Tab 思考等级  ·  PageUp/PageDown 浏览')}`);
     this.ui.requestRender();
   }
-  private note(text: string) { this.transcript.addChild(new Text(safeTerminalText(text), 1, 0)); this.ui.requestRender(); }
+  private note(text: string) { this.transcript.addChild(new Text(theme.fg('muted', safeTerminalText(text)), 1, 0)); this.ui.requestRender(); }
   private message(message: ConversationMessage) {
     if (message.contextId !== this.contextId || this.seen.has(message.id)) return;
     if (message.role !== 'user' && message.role !== 'assistant') return;
@@ -341,14 +498,14 @@ export class TerminalApp {
     if (message.originContextId) this.transcript.addChild(new Text(`来自上下文 ${label(message.originContextId)}`, 1, 0));
     const row = new Container();
     if (message.role === 'user') {
-      row.addChild(new UserMessageComponent(safeTerminalText(message.content), markdownTheme));
+      row.addChild(new UserMessageComponent(safeTerminalText(message.content), markdownTheme, 1, [], undefined, undefined, { color: text => theme.fg('userMessageText', text), bgColor: text => theme.bg('userMessageBg', text) }));
       const state = { view: new Text(userMessageState(message.status), 1, 0), status: message.status }; row.addChild(state.view);
       if (message.id.startsWith('signal:')) this.userRows.set(message.id.slice(7), state);
       this.transcript.addChild(row);
     }
     else {
       this.transcript.addChild(new Spacer(1));
-      this.transcript.addChild(new Text(message.kind === 'artifact' ? '交付' : '阿罗娜', 1, 0));
+      this.transcript.addChild(new Text(theme.fg('accent', theme.bold(message.kind === 'artifact' ? '交付' : '阿罗娜')), 1, 0));
       this.transcript.addChild(new Markdown(safeTerminalText(message.content), 1, 0, markdownTheme));
       if (message.attachments?.length) this.transcript.addChild(row);
     }
@@ -384,6 +541,8 @@ export class TerminalApp {
       this.isMainContext = this.contextRole === 'main';
       this.queueCount = snapshot.queuedMessages?.length ?? 0;
       this.updateCapacity(snapshot.capacity ?? null);
+      void this.refreshModel();
+      this.pendingApprovals = ((snapshot.approvals ?? []) as ApprovalRecord[]).filter(row => row.status === 'pending');
       this.currentRunId = snapshot.runs?.find(run => run.status === 'running')?.id;
       this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.visibleAttachments.delete(context); this.lastAssistant.delete(context); this.transcript.clear();
       if (discardedAttachments) this.note('核心存储已变化，之前待发送的附件已清除，请重新选择。');
@@ -417,6 +576,7 @@ export class TerminalApp {
       }
       if (!this.seededHistory.has(context)) { for (const value of history.slice(-100)) this.editor.addToHistory(value); this.seededHistory.add(context); }
       this.contextReady = true;
+      void this.presentApproval();
       this.status('已连接'); void this.refreshQueue(); void this.connectStream(generation);
     } catch {
       if (this.stopped || generation !== this.generation) return;
@@ -438,6 +598,8 @@ export class TerminalApp {
     this.ui.requestRender();
   }
   private event(event: PublicEvent) {
+    // Approvals are global: the footer counts every context and the prompt opens when you enter it.
+    if (event.kind === 'state' && (event.data as { area?: string } | undefined)?.area === 'approvals') { void this.refreshApprovals(); return; }
     if (event.contextId !== this.contextId) return;
     if (event.kind === 'conversation') {
       const message = event.data as ConversationMessage & { replyDraftId?: string };
@@ -466,6 +628,8 @@ export class TerminalApp {
     } else if (event.kind === 'state') {
       const data = event.data as { area?: string };
       if (data?.area === 'message-queue') void this.refreshQueue();
+      else if (data?.area === 'approvals') void this.refreshApprovals();
+      else if (data?.area === 'contexts' || data?.area === 'configuration') void this.refreshModel();
     } else if (event.kind === 'error') this.status('运行发生错误');
   }
   private replyEvent(event: PublicEvent) {
@@ -502,9 +666,9 @@ export class TerminalApp {
     this.queuePreview.clear();
     if (!rows.length) return;
     const shown = rows.slice(0, 3);
-    for (const row of shown) this.queuePreview.addChild(new TruncatedText(`排队：${label(row.content) || '（仅附件）'}${row.attachments?.length ? ` · 附件 ${row.attachments.length}` : ''}`, 1, 0));
-    if (rows.length > shown.length) this.queuePreview.addChild(new TruncatedText(`…另有 ${rows.length - shown.length} 条`, 1, 0));
-    this.queuePreview.addChild(new TruncatedText('↳ Alt+↑ 撤回并编辑全部排队消息 · /queue 逐条管理', 1, 0));
+    for (const row of shown) this.queuePreview.addChild(new TruncatedText(theme.fg('dim', `排队：${label(row.content) || '（仅附件）'}${row.attachments?.length ? ` · 附件 ${row.attachments.length}` : ''}`), 1, 0));
+    if (rows.length > shown.length) this.queuePreview.addChild(new TruncatedText(theme.fg('dim', `…另有 ${rows.length - shown.length} 条`), 1, 0));
+    this.queuePreview.addChild(new TruncatedText(theme.fg('dim', '↳ Alt+↑ 撤回并编辑全部排队消息 · /queue 逐条管理'), 1, 0));
   }
   private async refreshQueue() {
     if (!this.capabilities.has('message-queue')) return;
@@ -557,7 +721,7 @@ export class TerminalApp {
     this.contextId = contextId;
     this.editor = this.editors.get(contextId) ?? this.createEditor(); this.editors.set(contextId, this.editor);
     this.overlays = createOverlayHandlers(this.ui, this.editor); this.mountEditor();
-    this.currentRunId = undefined; this.contextRole = undefined; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.transcript.clear(); this.ui.resetTextSelection();
+    this.currentRunId = undefined; this.contextRole = undefined; this.workingSet = undefined; this.contextReady = false; this.isMainContext = false; this.queueCount = 0; this.queuePreview.clear(); this.userRows.clear(); this.model = undefined; this.modelVersion++; this.usageText = ''; this.capacityText = ''; this.queueRefreshVersion++; this.cursor = 0; this.seen.clear(); this.drafts.clear(); this.toolCards.clear(); this.transcript.clear(); this.ui.resetTextSelection();
     this.status('连接中'); void this.loadContext(this.generation);
   }
   private request<T>(route: string, init?: RequestInit) {
@@ -749,7 +913,7 @@ export class TerminalApp {
       const selector = new SearchSelector(list, safeItems, filter);
       box.addChild(new Text(safeTerminalText(title), 0, 0)); if (preview) box.addChild(preview); box.addChild(new Spacer(1)); box.addChild(selector); box.addChild(new Text('输入搜索  ↑↓ 选择  Enter 确认  Esc 返回', 0, 0));
       const modal = new Modal(box, selector); let handle: OverlayHandle;
-      const finish = (value?: string) => { if (this.pendingModal !== cancel) return; this.pendingModal = undefined; this.overlays.closeOverlay(handle); resolve(value); };
+      const finish = (value?: string) => { if (this.pendingModal !== cancel) return; this.pendingModal = undefined; this.overlays.closeOverlay(handle); resolve(value); queueMicrotask(() => { void this.presentApproval(); }); };
       const cancel = () => finish(); this.pendingModal = cancel;
       list.onSelect = item => finish(item.value); list.onCancel = cancel;
       handle = this.overlays.openOverlay(modal, { width: '80%', maxHeight: '80%', margin: 1 });
@@ -1174,18 +1338,14 @@ export class TerminalApp {
     }
   }
   private async approvals() {
-    const snapshot = await this.request<TuiSnapshot>(`/snapshot?contextId=${routeId(this.contextId)}`);
-    const pending = (snapshot.approvals as ApprovalRecord[]).filter(x => x.status === 'pending');
-    const id = await this.choose('待审批', pending.map(x => ({ value: x.id, label: x.toolName, description: `${x.contextId} · ${x.id}` }))); if (!id) return;
+    await this.refreshApprovals();
+    const pending = this.pendingApprovals;
+    if (!pending.length) { this.note('没有待处理的审批。'); return; }
+    const id = await this.choose('待审批', pending.map(x => ({ value: x.id, label: `${x.toolName}${approvalTarget(x.args) ? ` · ${approvalTarget(x.args).slice(0, 80)}` : ''}`, description: `${x.contextId}${this.postponedApprovals.has(x.id) ? ' · 已暂缓' : ''}` }))); if (!id) return;
     const approval = pending.find(x => x.id === id)!;
-    const decision = await this.choose(`审批 ${label(approval.toolName)} · ${label(approval.contextId)}`, [{ value: 'details', label: '查看完整请求' }, { value: 'approve', label: '同意' }, { value: 'decline', label: '拒绝' }]);
-    if (!decision) return;
-    if (decision === 'details') { this.note(`审批请求 ${label(approval.id)}\n${safeTerminalText(JSON.stringify(approval.args, null, 2))}`); this.scroll.scrollToEnd(); return; }
-    const scope = decision === 'approve' ? await this.choose('选择授权范围', [{ value: 'once', label: '仅此次' }, { value: 'task', label: '此任务' }, { value: 'duty', label: '此职责' }]) : 'once';
-    if (!scope) return;
-    const confirm = await this.choose(`确认${decision === 'approve' ? '同意' : '拒绝'} ${label(approval.toolName)}？`, [{ value: 'yes', label: '确认' }, { value: 'no', label: '返回' }]);
-    if (confirm !== 'yes') return;
-    await this.write(`/approvals/${routeId(id)}`, { decision, scope }); this.note('审批已提交。');
+    this.postponedApprovals.delete(id); this.approvalOpen = id;
+    try { await this.decideApproval(approval); } catch (error) { if (!this.stopped) this.note(`审批未完成：${approvalError(error)}`); }
+    finally { this.approvalOpen = undefined; }
   }
   private async providerAuth() {
     const { providers } = await this.request<{ providers: Array<{ id: string; name: string; methods: Array<{ type: 'api_key' | 'oauth'; name: string }> }> }>('/auth/providers');

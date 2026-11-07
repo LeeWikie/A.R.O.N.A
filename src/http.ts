@@ -2,7 +2,7 @@ import {MAX_ASSET_BYTES} from './assets.js';
 import {webConfigurationSchema} from './web/index.js';
 import {getSupportedThinkingLevels} from '@earendil-works/pi-ai';
 import {interruptForeground} from './control.js';
-import {snapshot,conversationPage,publicEventPage,serveEventStream} from './event-stream.js';
+import {snapshot,conversationPage,publicEventPage,serveEventStream,publicApprovals} from './event-stream.js';
 import {workflowCatalog} from './workflows.js';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -73,6 +73,7 @@ export function createApp(core: Core) {
     if (input.archived !== undefined) core.archiveContext(c.req.param('id'), input.archived);
     return c.json(core.runtime.updateContext(c.req.param('id'), input));
   });
+  app.get('/contexts/:id/model', async c => c.json(await core.modelState(contextIdSchema.parse(c.req.param('id')))));
   app.post('/contexts/:id/model', async c => {
     const input = z.object({ profileId: z.string(), thinkingLevel: z.enum(thinkingLevels).nullable().optional() }).strict().parse(await readJSON(c.req.raw));
     return c.json(await core.switchModel(c.req.param('id'), input.profileId, input.thinkingLevel));
@@ -102,7 +103,7 @@ export function createApp(core: Core) {
     const input = z.object({ revision: z.number().int().positive() }).strict().parse(await readJSON(c.req.raw));
     return c.json(await core.tasks.control(c.req.param('id'), action, input.revision), 202);
   });
-  app.get('/approvals', c => c.json({ approvals: core.runtime.approvals() }));
+  app.get('/approvals', c => c.json({ approvals: publicApprovals(core) }));
   app.post('/approvals/:id', async c => {
     const input = z.object({ decision: z.enum(['approve', 'decline']), scope: z.enum(['once', 'task', 'duty']).default('once') }).strict().parse(await readJSON(c.req.raw));
     return c.json(await core.approve(c.req.param('id'), input.decision, input.scope));
