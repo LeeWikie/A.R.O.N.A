@@ -21,11 +21,11 @@ test('shutdown waits for external editor cancellation without remounting', { tim
   const identity = { protocolVersion: 1, instanceId: '00000000-0000-4000-8000-000000000001', storageId: '00000000-0000-4000-8000-000000000002', capabilities: ['snapshot', 'event-stream', 'conversation-history', 'reply-stream'] };
   const client = { async handshake() { return identity; }, async snapshot() { return { ...identity, selectedContextId: 'main', watermark: 0, contexts: [{ id: 'main', role: 'main' }], runs: [], drafts: [], conversation: { messages: [], hasMore: false } }; }, async *events({ signal }: { signal: AbortSignal }) { await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })); } } as unknown as Client;
   const terminal = new FakeTerminal(), app = new TerminalApp(client, 'main', terminal);
-  const target = app as unknown as { prompt: () => Promise<string>; choose: () => Promise<string>; editStrings: () => Promise<string[]>; externalEditor: () => Promise<void> };
+  const target = app as unknown as { prompt: () => Promise<string>; choose: () => Promise<string>; editStrings: () => Promise<string[]>; externalEditor: (ask?: boolean) => Promise<void> };
   target.prompt = async () => process.execPath; target.choose = async () => 'yes'; target.editStrings = async () => [fileURLToPath(new URL('./tui-external-writer.mjs', import.meta.url)), '--hold'];
   try {
     const running = app.run(); await new Promise(resolve => setTimeout(resolve, 40));
-    const editing = target.externalEditor();
+    const editing = target.externalEditor(true);
     for (let i = 0; i < 50 && !fs.existsSync(marker); i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(fs.existsSync(marker), true); const file = fs.readFileSync(marker, 'utf8');
     await app.stop(); await editing.catch(() => {}); await running;

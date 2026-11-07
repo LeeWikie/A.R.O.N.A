@@ -22,3 +22,29 @@ test('external editor termination does not return a modified draft', async () =>
   try { await assert.rejects(editExternally({ command: process.execPath, args: [writer, '--hold'], content: 'original', signal: controller.signal })); }
   finally { clearTimeout(timer); }
 });
+
+test('Ctrl+G opens $VISUAL directly without prompts, as Pi does', async () => {
+  const { TerminalApp } = await import('../src/tui/index.js');
+  const writer = fileURLToPath(new URL('./tui-external-writer.mjs', import.meta.url));
+  const before = { VISUAL: process.env.VISUAL, EDITOR: process.env.EDITOR };
+  process.env.VISUAL = `${process.execPath} ${writer}`; delete process.env.EDITOR;
+  const terminal = { columns: 80, rows: 24, kittyProtocolActive: false, start() {}, stop() {}, async drainInput() {}, write() {}, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {} };
+  const app = new TerminalApp({} as never, 'main', terminal as never);
+  const target = app as unknown as { prompt: () => Promise<string | undefined>; externalEditor: () => Promise<void>; editor: { getText(): string; setText(text: string): void } };
+  let prompted = false; target.prompt = async () => { prompted = true; return undefined; };
+  try {
+    target.editor.setText('unsent original');
+    await target.externalEditor();
+    assert.equal(prompted, false);
+    assert.match(target.editor.getText(), /edited line/);
+  } finally {
+    await app.stop();
+    for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  }
+});
+
+test('editor commands split like Pi but keep quoted paths', async () => {
+  const { splitCommand } = await import('../src/tui/index.js');
+  assert.deepEqual(splitCommand('code --wait'), ['code', '--wait']);
+  assert.deepEqual(splitCommand('"C:\\Program Files\\Editor\\edit.exe" -w'), ['C:\\Program Files\\Editor\\edit.exe', '-w']);
+});

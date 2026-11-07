@@ -267,6 +267,9 @@ class Modal implements Component {
 export type ApprovalChoice = 'once' | 'task' | 'duty' | 'decline' | 'later';
 const approvalLabels: Record<ApprovalChoice, string> = { once: '同意此次', task: '同意，并在此任务内放行同类调用', duty: '同意，并在此定时职责内放行', decline: '拒绝', later: '稍后处理' };
 const APPROVAL_PAGE = 10;
+/** Split an editor command like Pi (on spaces), but keep "quoted paths" whole so Windows paths with spaces work. */
+export function splitCommand(text: string) { return [...text.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map(match => match[1] ?? match[2] ?? match[3]!); }
+function formatBytes(bytes: number) { return bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 /** Pi footer formatTokens. */
 export function formatTokens(count: number) {
   if (count < 1000) return String(count);
@@ -700,7 +703,12 @@ export class TerminalApp {
     const visible = this.visibleAttachments.get(contextId) ?? new Set<string>();
     for (const id of ids.slice(0, 8)) {
       if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id)) continue;
-      visible.add(id); row.addChild(new Text(`附件 · ${label(id)}`, 1, 0));
+      visible.add(id); const line = new Text(theme.fg('muted', `附件 · ${label(id).slice(0, 8)}…`), 1, 0); row.addChild(line);
+      // Name, type and size come from the core's metadata; the id is only a placeholder until then.
+      void this.request<AssetInfo>(`/assets/${routeId(id)}/metadata`, { signal: this.contextController.signal }).then(info => {
+        if (this.stopped || contextId !== this.contextId) return;
+        line.setText(theme.fg('muted', `附件 · ${label(info.name)} · ${label(info.mediaType)} · ${formatBytes(info.bytes)}`)); this.ui.requestRender();
+      }).catch(() => {});
     }
     this.visibleAttachments.set(contextId, visible);
   }
@@ -1229,7 +1237,7 @@ export class TerminalApp {
       else if (action === 'workflows') await this.workflows();
       else if (action === 'memory') await this.memory();
       else if (action === 'notifications') await this.notifications();
-      else if (action === 'external-editor') await this.externalEditor();
+      else if (action === 'external-editor') await this.externalEditor(true);
       else if (action === 'tools') await this.toolActivity();
       else if (action === 'usage') await this.showUsage();
       else if (action === 'capacity') await this.showCapacity();
@@ -1422,17 +1430,27 @@ export class TerminalApp {
     else { const selected = await this.choose('选择模型', [...(field === 'memoryModel' ? [{ value: 'same', label: '与源上下文相同' }] : []), ...models.map(model => ({ value: model.id, label: model.name }))]); if (!selected) return; value = selected; }
     await this.write('/configuration/runtime', { [field]: value }); this.note('运行设置已更新。');
   }
-  private async externalEditor() {
-    const suggested = process.env.VISUAL ?? process.env.EDITOR ?? (process.platform === 'win32' ? 'notepad.exe' : 'vi');
-    const command = await this.prompt('本机编辑器程序路径（参数另行填写）', suggested); if (!command?.trim()) return;
-    const args = await this.editStrings('编辑器参数', []); if (!args) return;
-    const confirmation = await this.choose('该程序将读取当前输入的临时文件，确认启动？', [{ value: 'no', label: '返回' }, { value: 'yes', label: '启动' }]); if (confirmation !== 'yes') return;
+  /**
+   * Ctrl+G, as in Pi: $VISUAL/$EDITOR opens directly (command split on spaces, Pi's rule). Without one
+   * configured, or from /menu, the program and arguments are confirmed first.
+   */
+  private async externalEditor(ask = false) {
+    const configured = (process.env.VISUAL || process.env.EDITOR || '').trim();
+    let command: string; let args: string[];
+    if (configured && !ask) { [command, ...args] = splitCommand(configured) as [string, ...string[]]; }
+    else {
+      const suggested = configured || (process.platform === 'win32' ? 'notepad' : 'nano');
+      const chosen = await this.prompt('本机编辑器程序路径（参数另行填写）', suggested); if (!chosen?.trim()) return;
+      const extra = await this.editStrings('编辑器参数', []); if (!extra) return;
+      const confirmation = await this.choose('该程序将读取当前输入的临时文件，确认启动？', [{ value: 'no', label: '返回' }, { value: 'yes', label: '启动' }]); if (confirmation !== 'yes') return;
+      command = chosen.trim(); args = extra;
+    }
     const editor = this.editor; const content = editor.getExpandedText();
     const operation = (async () => {
       await this.ui.terminal.drainInput(1000); if (this.stopped) return;
       this.ui.stop(); this.started = false;
       try {
-        const result = await editExternally({ command: command.trim(), args, content, signal: this.lifetime.signal });
+        const result = await editExternally({ command, args, content, signal: this.lifetime.signal });
         if (this.stopped) return;
         if (result.status === 'complete') editor.setText(result.content); else this.note(result.message);
       } finally {

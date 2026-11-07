@@ -185,3 +185,19 @@ test('/compact posts focus text, switches to the derived context and shows the s
     assert.match(text, /已压缩：摘要 8 条较早消息，原样保留最近 2 条/); assert.match(text, /原上下文 main 未修改/);
   } finally { await app.stop(); }
 });
+
+test('attachments in the transcript are labelled by name, type and size', async () => {
+  const id = '11111111-1111-4111-8111-111111111111';
+  const client = { async request(route: string) {
+    if (route === `/assets/${id}/metadata`) return { id, name: 'photo.png', mediaType: 'image/png', bytes: 2048, sha256: 'x', createdAt: '' };
+    return {};
+  } } as unknown as Client;
+  const app = new TerminalApp(client, 'main', new FakeTerminal());
+  const target = app as unknown as { message(message: unknown): void; transcript: { children: Array<{ children?: Array<{ text?: string }> }> } };
+  try {
+    target.message({ id: 'signal:a', contextId: 'main', role: 'user', content: 'see', createdAt: '', runId: null, status: 'accepted', kind: 'message', attachments: [id] });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const text = target.transcript.children.flatMap(child => child.children ?? []).map(child => child.text ?? '').join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(text, /附件 · photo\.png · image\/png · 2\.0 KB/);
+  } finally { await app.stop(); }
+});
