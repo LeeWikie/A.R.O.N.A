@@ -5,24 +5,27 @@ import type { Agent } from '@mastra/core/agent';
 import type { Memory } from '@mastra/memory';
 import type { LibSQLStore } from '@mastra/libsql';
 import type { ContextRecord } from './runtime-store.js';
+import { AppError } from './domain.js';
 
 export class Sessions {
   readonly controller: AgentController;
   private readonly live = new Map<string, Session>();
   private readonly nativeCompletions=new Set<Promise<void>>();
+  private readonly runCompletions=new Map<string,Set<Promise<void>>>();
   private readonly nativeRunIds=new Set<string>();
+  private readonly eventRunIds=new WeakMap<AgentControllerEvent,string>();
   private readonly opening = new Map<string, Promise<Session>>();
   constructor(options: {
     main: Agent; worker: Agent; storage: LibSQLStore; memory: Memory;
     concurrency: number; onEvent: (record: ContextRecord, session: Session, event: AgentControllerEvent) => void;
     onEnd: (record: ContextRecord, session: Session, event: Extract<AgentControllerEvent, { type: 'agent_end' }>) => Promise<void>;
-    beforeStream?: (message: unknown, options: Record<string, unknown>) => Promise<void>;
+    beforeStream?: (message: unknown, options: Record<string, unknown>) => Promise<unknown>;
     workspace: (record: ContextRecord) => ReturnType<Session['getWorkspace']>;
   }) {
     this.options = options;
     this.controller = new AgentController({ id: 'shittimchest', resourceId: 'local', storage: options.storage, memory: options.memory,
       agent: options.main, modes: [{ id: 'main', agent: options.main }, { id: 'work', agent: options.worker }], defaultModeId: 'main',
-      disableBuiltinTools: ['ask_user', 'submit_plan', 'task_write', 'task_update', 'task_complete', 'task_check', 'subagent'],
+      disableBuiltinTools: [ 'task_write', 'task_update', 'task_complete', 'task_check', 'subagent'],
       backgroundTasks: { enabled: true, globalConcurrency: options.concurrency, perAgentConcurrency: options.concurrency,
         perOwnerConcurrency: { 'memory-organizer': 1 }, backpressure: 'queue', defaultTimeoutMs: 30 * 60_000,
         defaultRetries: { maxRetries: 0 }, recoverStaleTasksOnStart: false },
@@ -38,19 +41,35 @@ export class Sessions {
       // Observe the SDK's existing completion promise; never read or consume its stream here.
       Object.assign(agent,{[method]:(...args:unknown[])=>{
         const runId=args[1]&&typeof args[1]==='object'&&'runId' in args[1]?String(args[1].runId):undefined;if(runId)this.nativeRunIds.add(runId);
-        const output=Promise.resolve().then(async()=>{if(args[1]&&typeof args[1]==='object')await this.options.beforeStream?.(args[0],args[1] as Record<string,unknown>);return original(...args);});const completed=output.then(value=>value._waitUntilFinished());this.nativeCompletions.add(completed);
-        void completed.then(()=>this.nativeCompletions.delete(completed),()=>this.nativeCompletions.delete(completed));return output;
+        const output=Promise.resolve().then(async()=>{if(args[1]&&typeof args[1]==='object'){const replacement=await this.options.beforeStream?.(args[0],args[1] as Record<string,unknown>);if(replacement!==undefined)args[0]=replacement;}return original(...args);});const completed=output.then(value=>value._waitUntilFinished());this.nativeCompletions.add(completed);
+        if(runId){const runs=this.runCompletions.get(runId)??new Set<Promise<void>>();runs.add(completed);this.runCompletions.set(runId,runs);}
+        const settled=()=>{this.nativeCompletions.delete(completed);if(runId){const runs=this.runCompletions.get(runId);runs?.delete(completed);if(!runs?.size)this.runCompletions.delete(runId);}};
+        void completed.then(settled,settled);return output;
       }});
     }
   }
   peek(id: string) { return this.live.get(id); }
+  eventRunId(event:AgentControllerEvent){return this.eventRunIds.get(event);}
+  hasPendingNativeStream(runId:string){return Boolean(this.runCompletions.get(runId)?.size);}
+  async waitForNativePersistence(runId:string,signal:AbortSignal){
+    if(signal.aborted)return;
+    let abort=()=>{};const cancelled=new Promise<void>(resolve=>{abort=resolve;signal.addEventListener('abort',abort,{once:true});});
+    try{await Promise.race([Promise.allSettled([...(this.runCompletions.get(runId)??[])]),cancelled]);}finally{signal.removeEventListener('abort',abort);}
+  }
+  async reset(id: string) {
+    await this.opening.get(id);
+    const session = this.live.get(id);
+    if (session?.run.isRunning() || session?.run.getRunId() || session?.getCurrentRunId()) throw new AppError('context_busy', 409);
+    await this.controller.deleteSession({ sessionId: id });
+    this.live.delete(id);
+  }
   /** Submit to the SDK queue without losing its native receipt. */
-  async queueSignal(session: Session, signal: Parameters<Agent['queueSignal']>[0], requestContext?: RequestContext) {
+  async queueSignal(session: Session, signal: Parameters<Agent['queueSignal']>[0], requestContext?: RequestContext, queuedRunId?:string) {
     await session.machinery.authorizeExecute?.(requestContext);
     const threadId=await session.thread.ensureId({requestContext});
     await session.thread.ensureSubscription(threadId,undefined,requestContext);
     const streamOptions=await session.machinery.buildStreamOptions({requestContext,abortSignal:new AbortController().signal});
-    return session.machinery.getAgent().queueSignal(signal,{resourceId:session.identity.getResourceId(),threadId,ifIdle:{streamOptions}});
+    return session.machinery.getAgent().queueSignal(signal,{resourceId:session.identity.getResourceId(),threadId,ifIdle:{streamOptions},...(queuedRunId?{queuedRunId}:{})});
   }
   async get(record: ContextRecord): Promise<Session> {
     const existing = this.live.get(record.id); if (existing) return existing;
@@ -60,25 +79,28 @@ export class Sessions {
       const session = await this.controller.createSession({ id: record.id, resourceId: 'local', threadId: record.id, tags: { role: record.role },
         requestContext, workspace: record.role === 'work' ? this.options.workspace(record) : undefined });
       await session.mode.switch({ modeId: record.role === 'work' ? 'work' : 'main' });
+      await session.thread.ensureId();
+      await session.model.syncFromPersisted();
       await session.state.set({yolo:false});
       for(const toolName of Object.keys(session.permissions.getRules().tools))await session.permissions.setForTool({toolName,policy:'ask'});
       for(const category of ['other','read','edit','execute','mcp'] as const) await session.permissions.setForCategory({category,policy:'ask'});
-      for(const toolName of ['emit_message','save_artifact','schedule_list','schedule_create','schedule_update','schedule_control','schedule_run','schedule_history','report_scheduled_task',
-        'context_list','context_create','context_history','context_archive','task_create','task_list','task_get','task_message','task_control','memory_request','method_list','model_list','model_switch','capability_status',
-        'task_report','method_save','method_control','workflow_run']) await session.permissions.setForTool({toolName,policy:'allow'});
+      for(const toolName of ['ask_user','submit_plan','emit_message',...(record.role === 'work' ? ['save_artifact','report_scheduled_task'] : []),'schedule_list','schedule_create','schedule_update','schedule_control','schedule_run','schedule_history',
+        'context_list','context_create','context_history','context_archive','task_create','task_list','task_get','task_message','task_control','memory_request','memory_list','memory_read','memory_search','method_list','model_list','model_switch','capability_status',
+        'task_report','method_save','method_control','workflow_run','read_terminal_result','list_session_artifacts','read_session_artifact','read_attachment','list_attachments',...(record.role==='work'?['read_web_result','read_mcp_result']:['companion_status','companion_configure'])]) await session.permissions.setForTool({toolName,policy:'allow'});
       await session.permissions.setForCategory({ category: 'mcp', policy: 'ask' });
       await session.permissions.setForTool({ toolName: 'configuration_update', policy: 'ask' });
       await session.permissions.setForTool({ toolName: 'mcp_connection', policy: 'ask' });
       this.live.set(record.id, session);
       session.subscribe(event => this.options.onEvent(record, session, event));
-      session.onBeforeAgentEnd(event => this.options.onEnd(record, session, event));
+      session.onBeforeAgentEnd(event => {const runId=session.run.getRunId();if(runId)this.eventRunIds.set(event,runId);return this.options.onEnd(record, session, event);});
       return session;
     })();
     this.opening.set(record.id, promise);
     try { return await promise; } finally { this.opening.delete(record.id); }
   }
-  async close(){
+  async close(preservedRuns:ReadonlySet<string>=new Set()){
     await Promise.allSettled(this.opening.values());
+    for(const id of preservedRuns)this.nativeRunIds.delete(id);
     let timer:ReturnType<typeof setTimeout>|undefined;
     const deadline=new Promise<false>(resolve=>{timer=setTimeout(()=>resolve(false),5000);});
     let waiting=true;

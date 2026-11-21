@@ -22,17 +22,19 @@ test('startup model edits preserve secret reference and default without returnin
   const http = createApp(core); let responseText = '';
   const client = { async request(route: string, init?: RequestInit) { const headers = new Headers(init?.headers); headers.set('Authorization', `Bearer ${core.controlToken}`); const response = await http.request(route, { ...init, headers }); const text = await response.text(); responseText += text; const body = JSON.parse(text) as { error?: string }; if (!response.ok) throw new AppError(body.error ?? 'request_failed', response.status); return body; } } as unknown as Client;
   const app = new TerminalApp(client, 'main', new FakeTerminal());
-  const target = app as unknown as { choose: () => Promise<string | undefined>; prompt: () => Promise<string | undefined>; editModel: () => Promise<void>; models: () => Promise<void> };
-  let choices = ['default', 'name']; target.choose = async () => choices.shift(); target.prompt = async () => 'Changed name';
+  const target = app as unknown as { choose: () => Promise<string | undefined>; prompt: () => Promise<string | undefined>; editModel: () => Promise<void>; models: () => Promise<void>; command: (text: string) => Promise<void> };
+  let choices = ['name']; target.choose = async () => choices.shift(); target.prompt = async () => 'Changed name';
   try {
     await target.editModel(); const saved = core.models.profile('default'); assert.ok(saved && 'apiKeyEnv' in saved);
     assert.equal(saved.apiKeyEnv, 'SHITTIMCHEST_STARTUP_MODEL_KEY'); assert.equal(saved.defaultThinkingLevel, 'high'); assert.equal(saved.name, 'Changed name');
     assert.equal(responseText.includes(secret), false); assert.doesNotThrow(() => core.models.resolve('default'));
-    choices = ['default', 'high']; await target.models();
-    assert.equal((core.sessions.peek('main')?.state.get() as { thinkingLevel?: string }).thinkingLevel, 'high');
-    choices = ['default', 'reset']; await target.models();
+    await target.command('/think high');
+    choices = ['default']; await target.models();
+    assert.equal((await core.modelState('main')).thinkingLevel, 'high');
+    assert.equal((await core.modelState('main')).source, 'profile');
+    await target.command('/think default');
     assert.equal((core.sessions.peek('main')?.state.get() as { thinkingLevel?: string }).thinkingLevel, undefined);
-    choices = ['default', 'thinking', 'high', 'remove', 'yes']; await target.editModel();
+    choices = ['thinking', 'high', 'remove', 'yes']; await target.editModel();
     const cleared = core.models.profile('default'); assert.ok(cleared && 'apiKeyEnv' in cleared); assert.equal(cleared.defaultThinkingLevel, undefined); assert.equal(cleared.thinking.high, undefined);
   } finally { await app.stop(); await core.close(); await removeTemp(directory); }
 });

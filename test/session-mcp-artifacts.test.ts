@@ -1,0 +1,98 @@
+import assert from 'node:assert/strict';
+import {createHash,randomUUID} from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
+import test from 'node:test';
+import {MastraLanguageModelV2Mock} from '@mastra/core/test-utils/llm-mock';
+import {Core} from '../src/core.js';
+import {SessionArtifactStore,sessionArtifactPiEntries,type PortableSessionArtifact} from '../src/session-artifacts.js';
+import {verifyMcpSessionArtifacts} from '../src/session-mcp-artifacts.js';
+import {McpResultStore,type McpResultBinding} from '../src/tools/mcp-results.js';
+import {retainMcpResult} from '../src/tools/mcp-result-tools.js';
+import type {McpResultWitness} from '../src/tools/mcp-model.js';
+import {ZodError} from 'zod';
+import {removeTemp} from './helpers.js';
+
+const hash=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex');
+async function fixture(modelText='PUBLIC_MODEL_TEXT'){
+ const db=new DatabaseSync(':memory:'),store=new SessionArtifactStore(db),live=new McpResultStore(db,'synthetic-mcp-artifact-key',store),binding:McpResultBinding={contextId:'work.synthetic',workspaceId:'default',taskId:randomUUID(),runId:randomUUID(),attempt:1,sourceSignalIds:[randomUUID()],toolCallId:'original-call',nativeMessageId:'original-native-row',serverId:'synthetic',toolName:'ext_synthetic',capabilityKey:'a'.repeat(64),proof:'b'.repeat(64)};
+ const binary=Buffer.from(Array.from({length:100003},(_,index)=>index%256)),image=Buffer.from([137,80,78,71,13,10,26,10]),audio=Buffer.from([0,255,45,33,123]),witness:McpResultWitness={version:1,packetReceived:true,validated:true,result:{content:[{type:'text',text:modelText,_meta:{hidden:'CONTENT_PRIVATE_CANARY'}},{type:'resource',resource:{uri:'fixture://binary/data.bin',mimeType:'application/octet-stream',blob:binary.toString('base64')}},{type:'resource',resource:{uri:'fixture://text/data.txt',mimeType:'text/plain',blob:Buffer.from('DECODED_TEXT_RESOURCE').toString('base64')}},{type:'image',mimeType:'image/png',data:image.toString('base64')},{type:'audio',mimeType:'audio/wav',data:audio.toString('base64')},{type:'resource_link',uri:'fixture://read/later',name:'later'}],structuredContent:{_meta:'BUSINESS_META_IS_DATA',value:42},_meta:{hidden:'PROTOCOL_PRIVATE_CANARY'}}};
+ const result=await retainMcpResult(live,witness,binding),refs=new Set(result.references.flatMap(row=>[row.id,live.describe(row.id).reference.originalResultId!]));
+ for(const id of refs){const exported=live.exportRetained(id),reference=exported.metadata.reference,artifact=await store.capture({kind:'mcp-result',entryIds:['result-entry'],origin:{ref:id,...exported.metadata.origin},name:reference.name,mediaType:reference.mediaType,complete:true,original:{mcp:{...reference}}},exported.chunks());store.bind('source',[artifact],new Set(['result-entry']));}
+ return{db,store,binary,image,audio,result,portable:store.portable('source')};
+}
+function rewrite(row:PortableSessionArtifact,content:Uint8Array){const sha256=hash(content),reference={...(row.original!.mcp as Record<string,unknown>),bytes:content.length,sha256};return{...row,bytes:content.length,sha256,original:{mcp:reference},parts:content.length?[{bytes:content.length,sha256,data:Buffer.from(content).toString('base64')}]:[]};}
+
+test('portable MCP business lanes are derived from the same private witness and remain read-only after a new-store import',async()=>{
+ const f=await fixture(),targetDb=new DatabaseSync(':memory:');try{
+  await verifyMcpSessionArtifacts(f.portable);const target=new SessionArtifactStore(targetDb),staged=target.stage(f.portable);target.bind('imported',staged,new Set(['result-entry']));const selected=new Set(['result-entry']),listed=target.list('imported',selected),raw=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-call-tool-result')!;
+  assert.equal(listed.length,5);assert.ok(listed.every(row=>row.readable));assert.doesNotMatch(JSON.stringify(listed),/PROTOCOL_PRIVATE_CANARY|CONTENT_PRIVATE_CANARY|mcp-call-tool-result|originalResultId/);assert.throws(()=>target.read('imported',raw.id,selected),/session_artifact_private_backup/);assert.throws(()=>target.read('imported',raw.origin.ref,selected),/session_artifact_private_backup/);assert.equal(target.list('imported',new Set()).length,0);
+  for(const [representation,expected]of [['mcp-model-resource',f.binary],['mcp-model-image',f.image],['mcp-model-audio',f.audio]] as const){const row=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation===representation)!,chunks:Buffer[]=[];for(let byteOffset=0;byteOffset<expected.length;){const page=target.read('imported',row.id,selected,{encoding:'base64',byteOffset,maxBytes:32768});chunks.push(Buffer.from(page.content,'base64'));byteOffset=page.nextByteOffset??expected.length;}assert.deepEqual(Buffer.concat(chunks),expected);}
+  const text=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-text')!;assert.match(target.read('imported',text.id,selected).content,/PUBLIC_MODEL_TEXT/);assert.match(target.read('imported',text.id,selected).content,/DECODED_TEXT_RESOURCE/);assert.doesNotMatch(target.read('imported',text.id,selected).content,/PROTOCOL_PRIVATE_CANARY|CONTENT_PRIVATE_CANARY/);assert.equal(target.read('imported',text.origin.ref,selected).content,target.read('imported',text.id,selected).content);assert.doesNotMatch(JSON.stringify(target.read('imported',text.origin.ref,selected).source),/originalResultId/);assert.throws(()=>target.read('imported',text.origin.ref,new Set()),/session_artifact_not_authorized/);
+  const structured=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-structured')!;assert.match(target.read('imported',structured.id,selected).content,/BUSINESS_META_IS_DATA/);assert.match(Buffer.concat(raw.parts.map(part=>Buffer.from(part.data,'base64'))).toString(),/PROTOCOL_PRIVATE_CANARY/,'the private backup retains its original witness');assert.equal(targetDb.prepare("SELECT name FROM sqlite_master WHERE name='mcp_result_records'").get(),undefined,'imported data does not create live MCP bindings');
+ }finally{f.db.close();targetDb.close();}
+});
+
+test('portable MCP metadata cannot relabel protocol bytes, change source, omit a witness or forge its validation state',async()=>{
+ const f=await fixture();try{
+  const text=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-text')!,raw=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-call-tool-result')!;
+  const leaked=rewrite(text,Buffer.from('PROTOCOL_PRIVATE_CANARY'));await assert.rejects(verifyMcpSessionArtifacts(f.portable.map(row=>row.id===text.id?leaked:row)),/mcp_result_projection_changed/);
+  await assert.rejects(verifyMcpSessionArtifacts(f.portable.map(row=>row.id===raw.id?{...row,kind:'worker-session'}:row)),/invalid_session_mcp_artifact/);
+  await assert.rejects(verifyMcpSessionArtifacts(f.portable.filter(row=>row.id!==raw.id)),/invalid_session_mcp_artifact/);
+  await assert.rejects(verifyMcpSessionArtifacts(f.portable.map(row=>row.id===text.id?{...row,origin:{...row.origin,contextId:'other-context'}}:row)),/invalid_session_mcp_artifact/);
+  await assert.rejects(verifyMcpSessionArtifacts(f.portable.map(row=>row.id===text.id?{...row,original:{mcp:{...(row.original!.mcp as Record<string,unknown>),validated:false}}}:row)),/invalid_session_mcp_artifact/);
+  await assert.rejects(verifyMcpSessionArtifacts(f.portable.map(row=>row.id===raw.id?{...row,entryIds:['other-result-entry']}:row)),/invalid_session_mcp_artifact/);
+ }finally{f.db.close();}
+});
+
+test('an unavailable binary lane preserves verified text and images without granting access or trusting a replacement descriptor',async()=>{
+ const f=await fixture(),db=new DatabaseSync(':memory:');try{
+  const resource=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-resource')!,kept=f.portable.filter(row=>row.id!==resource.id),missing=f.store.describeUnavailable({kind:resource.kind,entryIds:resource.entryIds,origin:resource.origin,name:resource.name,mediaType:resource.mediaType,expectedSha256:resource.sha256,reason:'source-unavailable',original:resource.original});
+  await verifyMcpSessionArtifacts(kept,undefined,[missing]);const store=new SessionArtifactStore(db),selected=new Set(['result-entry']);store.bind('imported',store.stage(kept),selected);store.bindUnavailable('imported',[missing],selected);assert.equal(store.list('imported',selected).length,5);await assert.rejects(store.readMcp('imported',resource.origin.ref,selected,{encoding:'base64'}),/session_artifact_unavailable/);const image=kept.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-image')!;assert.deepEqual(Buffer.from(store.read('imported',image.id,selected,{encoding:'base64'}).content,'base64'),f.image);
+  await assert.rejects(verifyMcpSessionArtifacts(kept),/invalid_session_mcp_artifact/);
+  await assert.rejects(verifyMcpSessionArtifacts(kept,undefined,[{...missing,origin:{...missing.origin,contextId:'other-context'}}]),/invalid_session_mcp_artifact/);
+  await assert.rejects(verifyMcpSessionArtifacts(kept,undefined,[{...missing,expectedSha256:'a'.repeat(64),original:{mcp:{...(missing.original!.mcp as Record<string,unknown>),sha256:'a'.repeat(64)}}}]),/invalid_session_mcp_artifact/);
+  await assert.rejects(verifyMcpSessionArtifacts(kept,undefined,[{...missing,original:{mcp:{...(missing.original!.mcp as Record<string,unknown>),validated:false}}}]),/mcp_result_projection_changed/);
+ }finally{f.db.close();db.close();}
+});
+
+test('both Core import formats verify MCP safe lanes before publishing a context and preserve the private witness only for backup',async()=>{
+ const f=await fixture(),directory=fs.mkdtempSync(path.join(os.tmpdir(),'arona-mcp-artifact-import-'));let calls=0;const core=await Core.open({dataDir:directory,memoryEnabled:false,model:new MastraLanguageModelV2Mock({doStream:async()=>{calls++;throw new Error('import-must-not-execute');}})});
+ try{
+  const timestamp='2026-01-01T00:00:00.000Z',header={type:'session' as const,version:3,id:'synthetic-mcp-history',cwd:'/synthetic',timestamp},entry={type:'message' as const,id:'source-user',parentId:null,timestamp,message:{role:'user' as const,content:'IMPORTED_EXTERNAL_DATA',timestamp:1}},source=await core.importPiContext({jsonl:[header,entry].map(row=>JSON.stringify(row)).join('\n'),modelProfile:'default'}),archive=await core.exportContinuationContext(source.id,true),portable=f.portable.map(row=>({...row,entryIds:[entry.id]})),text=portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-text')!,leaked=rewrite(text,Buffer.from('PROTOCOL_PRIVATE_CANARY')),invalid=portable.map(row=>row.id===text.id?leaked:row),raw=portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-call-tool-result')!;
+  for(const format of['archive','pi']as const){
+   const rejectedId=`chat.rejected-${format}-${randomUUID()}`;if(format==='archive'){const bad=structuredClone(archive);bad.continuation!.artifacts=invalid;await assert.rejects(core.importContext({archive:bad,id:rejectedId}),/mcp_result_projection_changed/);}else{const entries=[header,entry,...sessionArtifactPiEntries(invalid,entry.id)];await assert.rejects(core.importPiContext({jsonl:entries.map(row=>JSON.stringify(row)).join('\n'),id:rejectedId,modelProfile:'default'}),/mcp_result_projection_changed/);}assert.equal(core.runtime.context(rejectedId),undefined);assert.equal(await core.memory.getThreadById({threadId:rejectedId}),null);
+   let imported;if(format==='archive'){const valid=structuredClone(archive);valid.continuation!.artifacts=portable;imported=await core.importContext({archive:valid});}else imported=await core.importPiContext({jsonl:[header,entry,...sessionArtifactPiEntries(portable,entry.id)].map(row=>JSON.stringify(row)).join('\n'),modelProfile:'default'});
+   const selected=new Set(core.sessionGraph.manager(imported.id).getBranch().map(row=>row.id));assert.equal(core.sessionArtifacts.list(imported.id,selected).length,5);assert.throws(()=>core.sessionArtifacts.read(imported.id,raw.id,selected),/session_artifact_private_backup/);assert.equal(core.store.db.prepare("SELECT name FROM sqlite_master WHERE name='mcp_result_records'").get(),undefined);const exported=await core.exportContinuationContext(imported.id,true);assert.equal(exported.continuation!.artifacts!.length,6);await verifyMcpSessionArtifacts(exported.continuation!.artifacts!);assert.equal(calls,0);
+  }
+ }finally{f.db.close();await core.close();await removeTemp(directory);}
+});
+
+test('historical MCP reads preserve native line offsets and bounded source pages instead of treating lines as bytes',async()=>{
+ const f=await fixture(Array.from({length:6000},(_,index)=>`LINE_${String(index).padStart(5,'0')}_中文`).join('\n')),db=new DatabaseSync(':memory:');try{
+  const store=new SessionArtifactStore(db),selected=new Set(['result-entry']);await verifyMcpSessionArtifacts(f.portable);store.bind('imported',store.stage(f.portable),selected);const row=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-text')!,page=await store.readMcp('imported',row.origin.ref,selected,{offset:5000,limit:2});assert.equal(page.representation,'utf8-source-text');assert.equal(page.authority,'imported-untrusted-history');if(page.representation!=='utf8-source-text')throw new Error('line-page');assert.match(page.content,/LINE_04999_中文\nLINE_05000_中文/);assert.equal(page.nextOffset,5002);assert.equal(page.complete,false);assert.doesNotMatch(JSON.stringify(page.source),/originalResultId|PROTOCOL_PRIVATE_CANARY/);
+  const first=await store.readMcp('imported',row.origin.ref,selected,{offset:1,limit:10000});assert.equal(first.representation,'utf8-source-text');if(first.representation!=='utf8-source-text')throw new Error('line-page');assert.ok(first.nextOffset&&first.nextOffset<6000);assert.ok(Buffer.byteLength(first.content)<55000);await assert.rejects(store.readMcp('imported',row.origin.ref,new Set(),{offset:5000,limit:2}),/session_artifact_not_authorized/);const raw=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-call-tool-result')!;await assert.rejects(store.readMcp('imported',raw.origin.ref,selected,{offset:1,limit:2}),/session_artifact_private_backup/);
+ }finally{f.db.close();db.close();}
+});
+
+test('historical MCP long lines, binary lanes and cancellation retain exact byte-page and incomplete-page semantics',async()=>{
+ const f=await fixture('长'.repeat(40000)),db=new DatabaseSync(':memory:');try{
+  const store=new SessionArtifactStore(db),selected=new Set(['result-entry']);await verifyMcpSessionArtifacts(f.portable);store.bind('imported',store.stage(f.portable),selected);const row=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-text')!,page=await store.readMcp('imported',row.origin.ref,selected,{offset:1,limit:1});assert.equal(page.representation,'utf8-source-text');if(page.representation!=='utf8-source-text')throw new Error('line-page');assert.equal(page.requiresByteRead,true);assert.equal(page.nextOffset,1);assert.equal(page.complete,false);const chunks:Buffer[]=[];for(let byteOffset=0;byteOffset<row.bytes;){const next=await store.readMcp('imported',row.origin.ref,selected,{encoding:'base64',byteOffset,maxBytes:32768});assert.equal(next.representation,'base64');if(next.representation!=='base64')throw new Error('byte-page');chunks.push(Buffer.from(next.content,'base64'));byteOffset=next.nextByteOffset??row.bytes;}assert.equal(hash(Buffer.concat(chunks)),row.sha256);
+  const image=f.portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-image')!;await assert.rejects(store.readMcp('imported',image.origin.ref,selected,{offset:1,limit:1}),/mcp_result_requires_base64/);const binary=await store.readMcp('imported',image.origin.ref,selected,{encoding:'base64',byteOffset:0,maxBytes:32768});assert.deepEqual(Buffer.from(binary.content,'base64'),f.image);
+  const controller=new AbortController(),reason=new Error('synthetic-cancel'),read=store.payloadChunks.bind(store);store.payloadChunks=async function*(payload,signal){for await(const chunk of read(payload,signal)){controller.abort(reason);yield chunk;}};await assert.rejects(store.readMcp('imported',row.origin.ref,selected,{offset:1,limit:1},controller.signal),error=>error===reason);
+ }finally{f.db.close();db.close();}
+});
+
+test('portable method cache facts remain source facts and legacy metadata is never rewritten during verification',async()=>{
+ for(const cached of[false,true]){
+  const db=new DatabaseSync(':memory:'),targetDb=new DatabaseSync(':memory:');try{
+   const store=new SessionArtifactStore(db),live=new McpResultStore(db,'synthetic-cache-portable-key',store),binding:McpResultBinding={contextId:'work.cache-source',workspaceId:'default',taskId:randomUUID(),runId:randomUUID(),attempt:1,sourceSignalIds:[randomUUID()],toolCallId:'original-resource-read',nativeMessageId:'original-cache-row',serverId:'cache',toolName:'read_mcp_resource',capabilityKey:'a'.repeat(64),proof:'b'.repeat(64)},witness:McpResultWitness={version:2,packetReceived:!cached,...(cached?{fromCache:true}:{}),validated:true,method:'resources/read',params:{uri:'fixture://original-cache'},result:{contents:[{uri:'fixture://original-cache',mimeType:'text/plain',text:'ORIGINAL_CACHE_BUSINESS_TEXT'}],_meta:{private:'PRIVATE_CACHE_PROTOCOL_META'}}};
+   const result=await retainMcpResult(live,witness,binding),ids=new Set(result.references.flatMap(row=>[row.id,live.describe(row.id).reference.originalResultId!]));
+   for(const id of ids){const exported=live.exportRetained(id),ref=exported.metadata.reference,artifact=await store.capture({kind:'mcp-result',entryIds:['original-cache-entry'],origin:{ref:id,...exported.metadata.origin},name:ref.name,mediaType:ref.mediaType,complete:true,original:{mcp:{...ref}}},exported.chunks());store.bind('source',[artifact],new Set(['original-cache-entry']));}
+   const portable=store.portable('source'),original=JSON.stringify(portable);await verifyMcpSessionArtifacts(portable);assert.equal(JSON.stringify(portable),original,'verification does not default or rewrite optional legacy facts');
+   const target=new SessionArtifactStore(targetDb),selected=new Set(['original-cache-entry']);target.bind('imported',target.stage(portable),selected);const text=portable.find(row=>(row.original!.mcp as{representation:string}).representation==='mcp-model-text')!;
+   const page=await target.readMcp('imported',text.origin.ref,selected);assert.match(page.content,/ORIGINAL_CACHE_BUSINESS_TEXT/);assert.doesNotMatch(JSON.stringify(page),/PRIVATE_CACHE_PROTOCOL_META|originalResultId/);const facts=page.source.original!.mcp as{packetReceived:boolean;fromCache?:boolean};assert.equal(facts.packetReceived,!cached);assert.equal(facts.fromCache??false,cached);assert.equal(targetDb.prepare("SELECT name FROM sqlite_master WHERE name='mcp_result_records'").get(),undefined);
+   for(const row of portable){const forged={...row,original:{mcp:{...(row.original!.mcp as Record<string,unknown>),fromCache:!cached}}};await assert.rejects(verifyMcpSessionArtifacts(portable.map(item=>item.id===row.id?forged:item)),error=>error instanceof ZodError||error instanceof Error&&/invalid_session_mcp_artifact|mcp_result_projection_changed/.test(error.message));}
+  }finally{db.close();targetDb.close();}
+ }
+});

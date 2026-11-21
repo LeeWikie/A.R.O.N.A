@@ -69,6 +69,31 @@ test('double Ctrl+C quits within 500 ms', () => withTty(async () => {
   assert.equal(terminal.stopped, true);
 }));
 
+test('Escape leaves idle shell input and double Escape opens the context tree without quitting', () => withTty(async () => {
+  const { client, release } = fixture(); release();
+  const terminal = new TypingTerminal(), app = new TerminalApp(client, 'main', terminal);
+  const ui = app as unknown as { editor: { setText(text: string): void; getText(): string }; contexts(): Promise<void> };
+  let opened = 0; ui.contexts = async () => { opened++; };
+  const running = app.run();
+  try {
+    await settle(); ui.editor.setText('!!printf not-executed'); terminal.input('\x1b'); assert.equal(ui.editor.getText(), '');
+    terminal.input('\x1b'); terminal.input('\x1b'); await settle(); assert.equal(opened, 1); assert.equal(terminal.stopped, false);
+  } finally { await app.stop(); await running; }
+}));
+
+test('automatic context work reports its real phase and clears stale capacity after completion', async () => {
+  const { client } = fixture(); const app = new TerminalApp(client, 'main', new TypingTerminal());
+  const ui = app as unknown as { event(event: unknown): void; capacityText: string; automaticCompaction: boolean; contextId: string; editor: { getText(): string; setText(text: string): void } };
+  try {
+    ui.editor.setText('keep this draft'); ui.capacityText = '旧容量 95%';
+    ui.event({ contextId: 'main', runId: 'run', kind: 'compaction', data: { state: 'running', automatic: true, reason: 'threshold' } }); assert.equal(ui.automaticCompaction, true);
+    ui.event({ contextId: 'main', runId: 'run', kind: 'compaction', data: { state: 'finished', automatic: true, coveredMessages: 12 } });
+    assert.equal(ui.automaticCompaction, false); assert.equal(ui.capacityText, ''); assert.equal(ui.contextId, 'main'); assert.equal(ui.editor.getText(), 'keep this draft');
+    assert.match(transcript(app), /自动整理[\s\S]*12 条记录/);
+    ui.event({ contextId: 'main', runId: 'run', kind: 'compaction', data: { state: 'failed', automatic: true, code: 'auto_compaction_failed' } }); assert.match(transcript(app), /整理未完成[\s\S]*\/compact/);
+  } finally { await app.stop(); }
+});
+
 test('Esc stops the observed run; failures and aborts are explained in the transcript', () => withTty(async () => {
   const run = { id: 'run-1', contextId: 'main', status: 'running', createdAt: new Date().toISOString() };
   const { client, writes, release } = fixture([

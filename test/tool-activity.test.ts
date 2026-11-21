@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { RuntimeStore } from '../src/runtime-store.js';
 import {Core} from '../src/core.js';
 import {publicToolEvent} from '../src/tool-activity.js';
 import {authenticatedApp,finished,removeTemp,scriptedModel} from './helpers.js';
@@ -33,8 +35,12 @@ test('native tools create recoverable public activity without exposing their res
 
 test('a tool call rejected by input validation is shown as failed, not finished', async () => {
   const { publicToolEvent } = await import('../src/tool-activity.js');
-  const core = { redactionValues: () => [], store: { db: { prepare: () => ({ get: () => ({ data: JSON.stringify({ toolCallId: 'x', toolName: 'task_create', args: {} }) }) }) } } };
-  const event = { seq: 2, kind: 'tool_end', contextId: 'main', runId: 'r', taskId: null, createdAt: '', data: { toolCallId: 'x', result: { error: true, message: 'Tool input validation failed' } } };
-  assert.equal(publicToolEvent(core as never, event).state, 'failed');
-  assert.equal(publicToolEvent(core as never, { ...event, data: { toolCallId: 'x', result: { ok: true } } }).state, 'finished');
+  const db = new DatabaseSync(':memory:'); const runtime = new RuntimeStore(db);
+  const core = { redactionValues: () => [], store: { db } };
+  try {
+    runtime.event({ contextId: 'main', runId: 'r', kind: 'tool_start', data: { toolCallId: 'x', toolName: 'task_create', args: {} } });
+    const event = { seq: 2, kind: 'tool_end', contextId: 'main', runId: 'r', taskId: null, createdAt: '', data: { toolCallId: 'x', result: { error: true, message: 'Tool input validation failed' } } };
+    assert.equal(publicToolEvent(core as never, event).state, 'failed');
+    assert.equal(publicToolEvent(core as never, { ...event, data: { toolCallId: 'x', result: { ok: true } } }).state, 'finished');
+  } finally { db.close(); }
 });

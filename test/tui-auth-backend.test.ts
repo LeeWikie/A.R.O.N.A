@@ -8,7 +8,7 @@ import type { Server } from 'node:http';
 import { test } from 'node:test';
 import { serve } from '@hono/node-server';
 import { fauxProvider } from '@earendil-works/pi-ai';
-import type { Terminal } from '@earendil-works/pi-tui';
+import type { NativeClipboard, Terminal } from '@earendil-works/pi-tui';
 import { Client } from '../src/client.js';
 import { Core } from '../src/core.js';
 import { createApp } from '../src/http.js';
@@ -28,21 +28,28 @@ test('fake upstream OAuth uses actual Core auth endpoints and masked UI', { time
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'arona-tui-auth-'));
   const core = await Core.open({ dataDir: directory, memoryEnabled: false });
   const provider = fauxProvider({ provider: 'fake-tui' }).provider;
+  const authorizationUrl = `https://example.invalid/authorize?state=${'a'.repeat(310)}&redirect_uri=http%3A%2F%2Flocalhost%3A1455`; let starts = 0;
   core.providerRegistry.setProvider({ ...provider, auth: { oauth: {
-    name: 'Fixture OAuth', login: async interaction => { interaction.notify({ type: 'auth_url', url: 'https://example.invalid/authorize' }); const code = await interaction.prompt({ type: 'manual_code', message: 'Fixture code' }); return { type: 'oauth', access: code, refresh: 'fixture-refresh', expires: Date.now() + 60_000 }; },
+    name: 'Fixture OAuth', login: async interaction => { starts++; interaction.notify({ type: 'auth_url', url: authorizationUrl }); const code = await interaction.prompt({ type: 'manual_code', message: 'Fixture code' }); return { type: 'oauth', access: code, refresh: 'fixture-refresh', expires: Date.now() + 60_000 }; },
     refresh: async credential => credential, toAuth: async credential => ({ apiKey: credential.access }),
   } } });
   const server = serve({ fetch: createApp(core).fetch, hostname: '127.0.0.1', port: 0 }); if (!server.listening) await once(server, 'listening');
   const client = new Client(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, core.controlToken);
-  const terminal = new FakeTerminal(); const app = new TerminalApp(client, 'main', terminal);
+  const copied: string[] = []; const terminal = new FakeTerminal(); const app = new TerminalApp(client, 'main', terminal, { clipboard: { setText: async text => { copied.push(text); } } as NativeClipboard });
   const target = app as unknown as { choose: () => Promise<string | undefined>; providerAuth: () => Promise<void>; note: (text: string) => void };
+  const opened: string[] = []; (app as any).openWebUrl = async (url: string) => { opened.push(url); };
   const choices = ['fake-tui', 'oauth']; const notes: string[] = []; target.choose = async () => choices.shift(); target.note = text => { notes.push(text); };
   try {
     const running = app.run(); await until(() => terminal.output, text => text.includes('已连接'));
+    (app as any).editor.setText('原来的未发送草稿');
     const auth = target.providerAuth(); await until(() => terminal.output, text => text.includes('Fixture code'));
-    terminal.send('fixture-oauth-secret\r'); await auth;
+    terminal.send('fixture-oauth-'); terminal.send('\x18'); terminal.send('\x0f');
+    await until(() => opened.length, count => count === 2);
+    assert.deepEqual(copied, [authorizationUrl]);
+    terminal.send('secret\r'); await auth;
     assert.equal((await core.auth.status('fake-tui')).configured, true);
-    assert.ok(notes.some(note => note.includes('https://example.invalid/authorize')));
+    assert.ok(terminal.output.includes('https://example.invalid/authorize')); assert.deepEqual(opened, [authorizationUrl, authorizationUrl]); assert.equal(starts, 1);
+    assert.equal((app as any).editor.getText(), '原来的未发送草稿');
     assert.equal(terminal.output.includes('fixture-oauth-secret'), false);
     await app.stop(); await running;
   } finally {

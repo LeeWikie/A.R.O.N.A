@@ -1,0 +1,30 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 43759973aef2d9ac04dc49d61fb8a900ed445244..be0b9c21a7cadc209b8a797676087f92423e19cc 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -3544,6 +3544,10 @@ var BackgroundTasksLibSQL = class BackgroundTasksLibSQL extends _mastra_core_sto
+ 			setClauses.push("retry_count = ?");
+ 			params.push(update.retryCount);
+ 		}
++		if ("timeoutMs" in update) {
++			setClauses.push("timeout_ms = ?");
++			params.push(update.timeoutMs);
++		}
+ 		if ("startedAt" in update) {
+ 			setClauses.push("startedAt = ?");
+ 			params.push(update.startedAt?.toISOString() ?? null);
+diff --git a/dist/index.js b/dist/index.js
+index a14c5b41062df8f48704d1bbba277f7f067f917b..ceea4546b678e17cdd970ca8230a996741f5d406 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -3543,6 +3543,10 @@ var BackgroundTasksLibSQL = class BackgroundTasksLibSQL extends BackgroundTasksS
+ 			setClauses.push("retry_count = ?");
+ 			params.push(update.retryCount);
+ 		}
++		if ("timeoutMs" in update) {
++			setClauses.push("timeout_ms = ?");
++			params.push(update.timeoutMs);
++		}
+ 		if ("startedAt" in update) {
+ 			setClauses.push("startedAt = ?");
+ 			params.push(update.startedAt?.toISOString() ?? null);

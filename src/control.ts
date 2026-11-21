@@ -7,7 +7,7 @@ export async function interruptForeground(core:Core,contextId:string,expectedRun
   if(context.role!=='main')throw new AppError('use_task_control',409);
   const session=core.sessions.peek(contextId);const run=core.store.getRun(expectedRunId);
   if(!session||session.getCurrentRunId()!==expectedRunId||run?.contextId!==contextId||run.status!=='running')throw new AppError('run_changed',409);
-  session.abort();
+  await core.abortExecution(contextId,expectedRunId);
   if(session.run.getRunId()===expectedRunId){
     const deadline=AbortSignal.timeout(10000);await session.run.waitForTeardown(deadline);
   }

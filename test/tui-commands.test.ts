@@ -16,8 +16,14 @@ type Internals = {
 
 function fixture() {
   const calls: Array<{ route: string; method?: string; body?: unknown }> = [];
+  let profileId = 'fast'; let thinkingLevel: string | null = null;
   const client = { async request(route: string, init?: RequestInit) {
     calls.push({ route, method: init?.method, body: init?.body ? JSON.parse(String(init.body)) as unknown : undefined });
+    if (route === '/contexts/main/model') {
+      if (init?.body) { const body = JSON.parse(String(init.body)); profileId = body.profileId; if ('thinkingLevel' in body) thinkingLevel = body.thinkingLevel; return {}; }
+      return { contextId: 'main', profileId, name: profileId, modelId: profileId + '-1', thinkingLevel: thinkingLevel ?? 'medium', requestedThinkingLevel: thinkingLevel,
+        source: thinkingLevel ? 'session' : 'model-default', thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'], defaultThinkingLevel: 'medium', unavailable: null };
+    }
     if (route === '/contexts' && !init?.method) return { contexts: [{ id: 'main', name: '主对话', role: 'main', modelProfile: 'fast', archived: false }, { id: 'chat.two', name: '第二', role: 'main', modelProfile: 'fast', archived: false }] };
     if (route === '/contexts' && init?.method === 'POST') return { id: 'chat.new', name: 'Fresh', role: 'main' };
     if (route === '/models') return { models: [{ id: 'fast', name: 'Fast', modelId: 'fast-1' }, { id: 'deep', name: 'Deep', modelId: 'deep-1' }] };
@@ -37,11 +43,11 @@ test('slash commands drive existing flows with typed backend requests', async ()
   const { app, target, calls, notes, switched } = fixture();
   try {
     await target.command('/help');
-    assert.ok(notes.at(-1)?.includes('/think <等级|default>'));
+    assert.ok(notes.at(-1)?.includes('/think [等级|default]'));
     assert.ok(notes.at(-1)?.includes('/quit'));
 
     await target.command('/new Fresh');
-    assert.deepEqual(calls.find(x => x.route === '/contexts' && x.method === 'POST')?.body, { name: 'Fresh', role: 'main' });
+    assert.deepEqual(calls.find(x => x.route === '/contexts' && x.method === 'POST')?.body, { name: 'Fresh', purpose: '', workspaceId: 'default', modelProfile: 'fast', role: 'main' });
     assert.deepEqual(switched, ['chat.new']);
 
     await target.command('/sessions 第二');
@@ -54,9 +60,9 @@ test('slash commands drive existing flows with typed backend requests', async ()
     assert.deepEqual(calls.find(x => x.route === '/contexts/main/model')?.body, { profileId: 'deep' });
 
     await target.command('/think HIGH');
-    assert.deepEqual(calls.filter(x => x.route === '/contexts/main/model').at(-1)?.body, { profileId: 'fast', thinkingLevel: 'high' });
+    assert.deepEqual(calls.filter(x => x.route === '/contexts/main/model' && x.method === 'POST').at(-1)?.body, { profileId: 'deep', thinkingLevel: 'high' });
     await target.command('/thinking default');
-    assert.deepEqual(calls.filter(x => x.route === '/contexts/main/model').at(-1)?.body, { profileId: 'fast', thinkingLevel: null });
+    assert.deepEqual(calls.filter(x => x.route === '/contexts/main/model' && x.method === 'POST').at(-1)?.body, { profileId: 'deep', thinkingLevel: null });
     const before = calls.length;
     await target.command('/think turbo');
     assert.equal(calls.length, before + 1, 'invalid level only reads context, never writes');
@@ -65,7 +71,7 @@ test('slash commands drive existing flows with typed backend requests', async ()
     await target.command('/name 新名字');
     assert.deepEqual(calls.find(x => x.route === '/contexts/main' && x.method === 'PATCH')?.body, { name: '新名字' });
 
-    let choices = ['default', 'safe', 'yes']; let prompts = ['检查文件'];
+    let choices = ['safe', 'yes']; let prompts = ['检查文件'];
     target.choose = async () => choices.shift(); target.prompt = async () => prompts.shift();
     await target.command('/task 读取 input.txt 并报告');
     assert.deepEqual(calls.find(x => x.route === '/tasks' && x.method === 'POST')?.body, { title: '检查文件', content: '读取 input.txt 并报告', workspaceId: 'default', returnContextId: 'main' });
@@ -122,7 +128,7 @@ test('typed slash commands autocomplete and run without reaching the model', asy
   try {
     const running = app.run(); await settle();
     terminal.send('/thi'); await settle();
-    assert.ok(terminal.output.includes('设置思考等级'), 'command suggestion is rendered');
+    assert.ok(terminal.output.includes('思考等级'), 'command suggestion is rendered');
     assert.equal(terminal.output.includes('停止当前运行'), false, 'unsupported /stop is hidden without capability');
     terminal.send('\x1b'); await settle();
     terminal.send('\x15'); await settle();

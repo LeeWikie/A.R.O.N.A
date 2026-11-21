@@ -7,7 +7,9 @@ import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
 import { Client, OutputCursor, watchOutputs } from './client.js';
 import { AppError } from './domain.js';
-import {ensureCore} from './startup.js';
+import {ensureCore, startupFailureMessage} from './startup.js';
+import { appBuildInfo } from './version.js';
+import { openTerminalSession } from './terminal-session-client.js';
 
 function jsonInput(args: string[]): unknown {
   const raw = args.join(' ');
@@ -25,28 +27,46 @@ async function readSecret() {
   try { return await new Promise<string>(resolve => reader.question('', resolve)); } finally { reader.close(); console.error(''); }
 }
 async function main() {
-  const args = process.argv.slice(2).filter(arg => arg !== '--');
+  const incoming = process.argv.slice(2); if(incoming[0]==='--')incoming.shift(); const separator = incoming.indexOf('--');
+  const args = separator < 0 ? incoming : incoming.slice(0, separator), literalArgs = separator < 0 ? [] : incoming.slice(separator + 1);
+  if (args.length === 1 && ['--version', '-v', 'version'].includes(args[0]!)) { console.log(`ShittimChest ${appBuildInfo.version}`); return; }
   const plainIndex=args.indexOf('--plain');const plain=plainIndex>=0;if(plain)args.splice(plainIndex,1);
+  const takeOption=(names:string[])=>{const found=args.flatMap((arg,index)=>names.includes(arg)?[index]:[]);if(found.length>1)throw new AppError('conflicting_session_options');const index=found[0];if(index===undefined)return;const value=args[index+1];if(!value||value.startsWith('-'))throw new AppError('session_option_value_required');args.splice(index,2);return value;};
+  const contextOption=takeOption(['--context','--session']);const workspaceOption=takeOption(['--workspace']);
+  const continueIndexes=args.flatMap((arg,index)=>['--continue','-c'].includes(arg)?[index]:[]);if(continueIndexes.length>1)throw new AppError('conflicting_session_options');const continuing=continueIndexes.length===1;if(continuing)args.splice(continueIndexes[0]!,1);
   const idIndex = args.indexOf('--id'); let operationId = randomUUID() as string;
   if (idIndex >= 0) { if (!args[idIndex + 1]) throw new AppError('operation_id_required'); operationId = args[idIndex + 1]!; args.splice(idIndex, 2); }
+  args.push(...literalArgs);
   const command = args.shift() ?? 'chat';
   const baseURL = process.env.SHITTIMCHEST_CORE_URL ?? process.env.ARONA_CORE_URL ?? 'http://127.0.0.1:4111';
-  const contextId = process.env.SHITTIMCHEST_CONTEXT_ID ?? process.env.ARONA_CONTEXT_ID ?? 'main';
+  const explicitContext=contextOption??process.env.SHITTIMCHEST_CONTEXT_ID??process.env.ARONA_CONTEXT_ID;
+  let contextId = explicitContext ?? 'main';
   const directory = path.join(process.env.SHITTIMCHEST_DATA_DIR || process.env.ARONA_DATA_DIR || path.join(os.homedir(), '.arona'), 'client');
-  const client = new Client(baseURL);
+  let client = new Client(baseURL);
   const print = (body: unknown) => console.log(JSON.stringify(body, null, 2));
   const write = (route: string, body: unknown, method = 'POST') => client.request(route, { method,
     headers: { 'content-type': 'application/json', 'Idempotency-Key': operationId }, body: JSON.stringify(body) });
   const id = () => { const value = args.shift(); if (!value) throw new AppError('id_required'); return encodeURIComponent(value); };
   if (command === 'help') {
-    console.log('ShittimChest\nchat | send TEXT | event TEXT | status | history [PAGE] | outputs [message|artifact] [CURSOR]\ntasks list|get|create|message|pause|resume|cancel|retry\ncontexts list|create|archive|unarchive|model\nmodels list|save | configuration show|runtime | workspaces list|add\nmcp list|add|connect|reconnect|disconnect | approvals list|approve|decline\nmethods list|get|save|enable|disable|rollback | workflows list|run\nmemory status|resident|request|retry | events [CONTEXT] [CURSOR] | usage [CONTEXT]\ncredentials list|set|remove | schedules list|get|create|update|pause|resume|cancel|run|history\nJSON 参数支持 @文件；--id 标识用于安全重试同一创建操作。密钥通过 credentials set NAME 的隐藏输入或标准输入设置，不放进命令参数。'); return;
+    console.log('ShittimChest\nchat | send TEXT | event TEXT | status | core start|status|stop | history [PAGE] | outputs [message|artifact] [CURSOR]\ntasks list|get|create|message|pause|resume|cancel|retry\ncontexts list|create|archive|unarchive|model\nmodels list|save | configuration show|runtime | workspaces list|add|update|remove\nmcp list|add|connect|reconnect|disconnect|remove | approvals list|approve|decline\nmethods list|get|revisions|save|enable|disable|rollback | workflows list|run\nmemory status|resident|request|retry|reconcile|import|versions|version|entry|diff|view|issues|plan|restore | events [CONTEXT] [CURSOR] | usage [CONTEXT]\ncredentials list|set|remove | schedules list|get|create|update|pause|resume|cancel|run|history\n终端从当前目录开始新会话；--continue / -c 接续此目录最近的会话，--context / --session ID 打开指定会话，--workspace ID 选择核心上的工作区。\nJSON 参数支持 @文件；--id 标识用于安全重试同一创建操作。密钥通过 credentials set NAME 的隐藏输入或标准输入设置，不放进命令参数。'); return;
   }
+  if((continuing||workspaceOption)&&!['chat','tui','send'].includes(command))throw new AppError('session_options_require_chat');
   if(command==='tui'||(command==='chat'&&process.stdin.isTTY&&!plain)){
     const controller=new AbortController();
     const interrupt=()=>controller.abort();process.once('SIGINT',interrupt);process.once('SIGTERM',interrupt);
-    try{const ready=await ensureCore({signal:controller.signal});for(const code of ready.diagnostics)console.error(`配置待修复：${code}；已以管理模式启动。`);const {runTui}=await import('./tui/index.js');await runTui(ready.client,contextId,controller.signal);}
+    try{const ready=await ensureCore({signal:controller.signal});for(const code of ready.diagnostics)console.error(`配置待修复：${code}；已以管理模式启动。`);const selection=await openTerminalSession(ready.client,{contextId:explicitContext,workspaceId:workspaceOption,continue:continuing,signal:controller.signal,operationId});const {runTui}=await import('./tui/index.js');await runTui(ready.client,selection.contextId,controller.signal,{resume:selection.resume});}
     finally{process.removeListener('SIGINT',interrupt);process.removeListener('SIGTERM',interrupt);}return;
   }
+  if (command === 'core') {
+    const action = args.shift() ?? 'status';
+    if (!['start', 'status', 'stop'].includes(action) || args.length) throw new AppError('unknown_core_command');
+    const ready = await ensureCore({ autoStart: action === 'start' });
+    if (action === 'stop') print(await ready.client.request('/core/stop', { method: 'POST' }));
+    else print({ ...(await ready.client.request<Record<string, unknown>>('/health')), started: ready.started, diagnostics: ready.diagnostics });
+    return;
+  }
+  if(!['status','credentials','tasks','contexts','notifications','models','configuration','workspaces','mcp','approvals','methods','skills','workflows','memory','events','usage','schedules','send','event','run','signal','history','outputs','chat','watch'].includes(command))throw new AppError('unknown_command');
+  if(command!=='chat'&&command!=='send')client=(await ensureCore({autoStart:false})).client;
   if (command === 'status') { print({ health: await client.request('/health'), configuration: await client.request('/configuration'), approvals: await client.request('/approvals') }); return; }
   if (command === 'credentials') {
     const action = args.shift() ?? 'list';
@@ -80,6 +100,8 @@ async function main() {
     if (action === 'list' || action === 'show') print(await client.request(command === 'configuration' ? '/configuration' : `/${command}`));
     else if (command === 'models' && action === 'save') print(await write('/configuration/model', jsonInput(args)));
     else if (command === 'workspaces' && action === 'add') print(await write('/configuration/workspace', jsonInput(args)));
+    else if (command === 'workspaces' && action === 'update') { const workspace = id(); print(await write(`/workspaces/${workspace}`, jsonInput(args), 'PATCH')); }
+    else if (command === 'workspaces' && action === 'remove') print(await client.request(`/workspaces/${id()}`, { method: 'DELETE' }));
     else if (command === 'configuration' && action === 'runtime') print(await write('/configuration/runtime', jsonInput(args)));
     else throw new AppError('unknown_configuration_command'); return;
   }
@@ -87,6 +109,7 @@ async function main() {
     const action = args.shift() ?? 'list';
     if (action === 'list') print(await client.request('/mcp'));
     else if (action === 'add') print(await write('/configuration/mcp', jsonInput(args)));
+    else if (action === 'remove') print(await client.request(`/mcp/${id()}`, { method: 'DELETE' }));
     else if (['connect', 'reconnect', 'disconnect'].includes(action)) print(await write(`/mcp/${id()}/${action}`, {}));
     else throw new AppError('unknown_mcp_command'); return;
   }
@@ -100,6 +123,7 @@ async function main() {
     const action = args.shift() ?? 'list';
     if (action === 'list') print(await client.request('/methods'));
     else if (action === 'get') print(await client.request(`/methods/${id()}`));
+    else if (action === 'revisions') print(await client.request(`/methods/${id()}/revisions`));
     else if (action === 'save') print(await write('/methods', jsonInput(args)));
     else if (action === 'enable' || action === 'disable') { const name = id(); print(await write(`/methods/${name}/control`, { revision: Number(args.shift()), enabled: action === 'enable' })); }
     else if (action === 'rollback') { const name = id(); print(await write(`/methods/${name}/rollback`, { revision: Number(args.shift()), restoreRevision: Number(args.shift()) })); }
@@ -114,6 +138,16 @@ async function main() {
     const action = args.shift() ?? 'status';
     if (action === 'status') print(await client.request('/memory'));
     else if (action === 'resident') print(await client.request('/memory/resident'));
+    else if (action === 'reconcile') print(await write('/memory/reconcile', {}));
+    else if (action === 'import') print(await write('/memory/imports', jsonInput(args)));
+    else if (action === 'versions') print(await client.request('/memory/versions'));
+    else if (action === 'version') print(await client.request(`/memory/versions/${id()}`));
+    else if (action === 'entry') { const version = id(); print(await client.request(`/memory/versions/${version}/entries/${id()}`)); }
+    else if (action === 'diff') { const from = id(), to = id(); print(await client.request(`/memory/diff?from=${from}&to=${to}`)); }
+    else if (action === 'view') print(await client.request(`/memory/runs/${id()}/view`));
+    else if (action === 'issues') print(await client.request('/memory/issues'));
+    else if (action === 'plan') print(await write('/memory/recovery/plans', jsonInput(args)));
+    else if (action === 'restore') print(await write(`/memory/recovery/plans/${id()}/execute`, {}));
     else if (action === 'request') print(await write('/memory/requests', { runId: args.shift() }));
     else if (action === 'retry') print(await write(`/memory/jobs/${id()}/retry`, {}));
     else throw new AppError('unknown_memory_command'); return;
@@ -132,6 +166,10 @@ async function main() {
     else if (action === 'list' || action === 'get') print(await client.request(route));
     else throw new AppError('unknown_schedule_command'); return;
   }
+  if(command==='send'||command==='chat'){
+    const ready=await ensureCore();client=ready.client;
+    const selection=await openTerminalSession(client,{contextId:explicitContext,workspaceId:workspaceOption,continue:continuing,operationId});contextId=selection.contextId;
+  }
   if (command === 'send' || command === 'event') {
     const text = args.join(' '); if (!text.trim()) throw new AppError('text_required');
     print(await client.submit(text, command === 'send' ? 'user-message' : 'external-event', contextId, operationId)); return;
@@ -142,7 +180,7 @@ async function main() {
   if (command !== 'chat' && command !== 'watch') throw new AppError('unknown_command');
   const kind = command === 'watch' && args[0] === 'artifact' ? 'artifact' : 'message';
   const controller = new AbortController(); process.once('SIGINT', () => controller.abort()); process.once('SIGTERM', () => controller.abort());
-  const cursor = new OutputCursor(directory, baseURL, contextId, kind); cursor.read(); let warned = false;
+  const cursor = new OutputCursor(directory, client.baseURL, contextId, kind); cursor.read(); let warned = false;
   const watching = watchOutputs({ client, cursor, kind, contextId, signal: controller.signal,
     onOutput: output => { warned = false; console.log(output.kind === 'message' ? `\n阿罗娜> ${output.content}` : `\n${output.title}\n${output.content}`); },
     onError: () => { if (!warned) { console.error('连接暂不可用，正在重试。'); warned = true; } } });
@@ -157,4 +195,4 @@ async function main() {
   }
   await watching;
 }
-main().catch((error: unknown) => { console.error(error instanceof AppError ? error.code : 'client_failed'); process.exitCode = 1; });
+main().catch((error: unknown) => { console.error(startupFailureMessage(error)); process.exitCode = error instanceof Error && error.name === 'AbortError' ? 130 : 1; });

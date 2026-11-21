@@ -89,14 +89,16 @@ test('provider default thinking is validated and explicit session levels overrid
     assert.deepEqual(models.options('think'), { providerOptions: { pi: { reasoning: 'high' } } });
     assert.deepEqual(models.options('think', 'low'), { providerOptions: { pi: { reasoning: 'low' } } });
     assert.deepEqual(models.options('think', 'off'), {});
-    assert.throws(() => models.save({ ...profile, defaultThinkingLevel: 'max' }), /thinking_level_not_supported/);
-    assert.throws(() => models.save({ ...profile, defaultThinkingLevel: 'minimal' }), /invalid_model_profile/);
-    assert.throws(() => models.options('think', 'minimal' as never), /thinking_level_not_supported/);
-    assert.deepEqual(models.profile('think'), profile);
+    models.save({ ...profile, defaultThinkingLevel: 'max' });
+    assert.equal(models.thinking('think').requestedThinkingLevel,'max');assert.equal(models.thinking('think').thinkingLevel,'high');
+    assert.deepEqual(models.options('think'),{providerOptions:{pi:{reasoning:'high'}}});
+    models.save({ ...profile, defaultThinkingLevel: 'minimal' });
+    assert.deepEqual(models.options('think', 'minimal'),{providerOptions:{pi:{reasoning:'minimal'}}});
+    assert.deepEqual(models.profile('think'), {...profile,defaultThinkingLevel:'minimal'});
     models.save({ ...profile, defaultThinkingLevel: 'off' });
     assert.deepEqual(models.options('think'), {});
     models.save({ id: 'think', name: 'Think', providerId: 'fake', modelId: 'reasoner' });
-    assert.deepEqual(models.options('think'), {});
+    assert.deepEqual(models.options('think'), {providerOptions:{pi:{reasoning:'medium'}}});
   } finally { db.close(); }
 });
 
@@ -108,6 +110,8 @@ test('startup model can be edited through a secret-free profile without dropping
   assert.equal(profile.apiKeyEnv,'SHITTIMCHEST_STARTUP_MODEL_KEY');assert.equal(profile.defaultThinkingLevel,'high');assert.ok(!JSON.stringify(models.configurationProfiles()).includes('synthetic-seed-secret'));
   models.save({...profile,name:'Edited startup model'});assert.ok(models.resolve('default'));
   assert.deepEqual(models.options('default'),{providerOptions:{openai:{store:false,include:['reasoning.encrypted_content'],reasoningEffort:'high'}}});
-  assert.throws(()=>models.save({...profile,defaultThinkingLevel:'low'}),/invalid_model_profile/);
+  models.save({...profile,defaultThinkingLevel:'low'});
+  assert.equal(models.thinking('default').requestedThinkingLevel,'low');assert.equal(models.thinking('default').thinkingLevel,'high');
+  assert.equal(models.options('default').providerOptions?.openai?.reasoningEffort,'high');
  }finally{db.close();}
 });

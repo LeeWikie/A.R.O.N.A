@@ -1,0 +1,26 @@
+import fs from 'node:fs';import path from 'node:path';import {createHash,randomUUID} from 'node:crypto';import {DatabaseSync} from 'node:sqlite';import {z} from 'zod';
+import {AppError} from '../domain.js';import type {SessionTransferJob} from '../protocol.js';import type {SessionTransferOptions} from '../session-transfer-store.js';
+
+export interface LocalSessionTransfer {
+ operationId:string;storageId:string;direction:'import'|'export';file:string;contextId?:string;format?:'pi'|'archive';html?:boolean;continuation?:boolean;importOptions?:SessionTransferOptions;
+ jobId?:string;state?:SessionTransferJob['state'];errorCode?:string;updatedAt:string;localComplete?:boolean;warnings?:SessionTransferJob['warnings'];
+}
+const schema=z.object({operationId:z.string().uuid(),storageId:z.string().min(1),direction:z.enum(['import','export']),file:z.string().min(1),contextId:z.string().optional(),format:z.enum(['pi','archive']).optional(),html:z.boolean().optional(),continuation:z.boolean().optional(),importOptions:z.object({id:z.string().optional(),name:z.string().optional(),workspaceId:z.string().optional(),modelProfile:z.string().optional()}).strict().optional(),jobId:z.string().uuid().optional(),state:z.enum(['uploading','uploaded','preparing','validating','publishing','ready','completed','failed','cancelled']).optional(),errorCode:z.string().optional(),updatedAt:z.string().datetime(),localComplete:z.boolean().optional(),warnings:z.array(z.object({code:z.literal('history_artifacts_unavailable'),count:z.number().int().positive()}).strict()).optional()}).strict();
+
+/** Local file addresses and operation references; only Core receipts describe publication. */
+export class SessionTransferFiles {
+ private readonly memory=new Map<string,LocalSessionTransfer>();private readonly file?:string;
+ constructor(private readonly directory?:string,scope=''){if(directory)this.file=path.join(directory,`session-files-${createHash('sha256').update(scope).digest('hex')}.sqlite`);}
+ private database<T>(action:(db:DatabaseSync)=>T){
+  fs.mkdirSync(this.directory!,{recursive:true,mode:0o700});const dir=fs.lstatSync(this.directory!);if(!dir.isDirectory()||dir.isSymbolicLink())throw new AppError('session_transfer_cache_redirected',403);
+  try{fs.closeSync(fs.openSync(this.file!,'wx',0o600));}catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;}
+  const before=fs.lstatSync(this.file!);if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1)throw new AppError('session_transfer_cache_redirected',403);
+  for(const suffix of ['-journal','-wal','-shm'])try{const stat=fs.lstatSync(this.file!+suffix);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1)throw new AppError('session_transfer_cache_redirected',403);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+  const fd=fs.openSync(this.file!,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0));let db:DatabaseSync|undefined;
+  try{const opened=fs.fstatSync(fd);if(!opened.isFile()||opened.nlink!==1||opened.dev!==before.dev||opened.ino!==before.ino)throw new AppError('session_transfer_cache_redirected',403);db=new DatabaseSync(this.file!);const after=fs.lstatSync(this.file!);if(after.isSymbolicLink()||after.dev!==opened.dev||after.ino!==opened.ino||after.nlink!==1)throw new AppError('session_transfer_cache_redirected',403);db.exec('PRAGMA busy_timeout=5000;PRAGMA synchronous=FULL;CREATE TABLE IF NOT EXISTS files(operation_id TEXT PRIMARY KEY,storage TEXT NOT NULL,body TEXT NOT NULL);');return action(db);}finally{db?.close();fs.closeSync(fd);}
+ }
+ save(input:LocalSessionTransfer){const row=schema.parse(input);if(this.file)this.database(db=>{db.exec('BEGIN IMMEDIATE');try{const prior=db.prepare('SELECT body FROM files WHERE operation_id=?').get(row.operationId);if(prior){const old=schema.parse(JSON.parse(String(prior.body)));for(const key of ['storageId','direction','file','contextId','format','html','continuation','importOptions'] as const)if(JSON.stringify(old[key])!==JSON.stringify(row[key]))throw new AppError('session_transfer_local_identity_conflict',409);}db.prepare('INSERT INTO files VALUES(?,?,?) ON CONFLICT(operation_id) DO UPDATE SET body=excluded.body').run(row.operationId,row.storageId,JSON.stringify(row));db.exec('COMMIT');}catch(error){db.exec('ROLLBACK');throw error;}});this.memory.set(row.operationId,structuredClone(row));return row;}
+ begin(input:Omit<LocalSessionTransfer,'operationId'|'updatedAt'>){return this.save({...input,operationId:randomUUID(),updatedAt:new Date().toISOString()});}
+ list(storageId:string){if(this.file)for(const row of this.database(db=>db.prepare('SELECT body FROM files WHERE storage=? ORDER BY rowid').all(storageId))){const value=schema.parse(JSON.parse(String(row.body)));this.memory.set(value.operationId,value);}return [...this.memory.values()].filter(row=>row.storageId===storageId).map(row=>structuredClone(row));}
+ progress(row:LocalSessionTransfer,job:SessionTransferJob){const{errorCode,warnings,...prior}=row;return this.save({...prior,jobId:job.id,state:job.state,...(job.errorCode?{errorCode:job.errorCode}:{}),...(job.warnings?.length?{warnings:job.warnings}:{}),updatedAt:new Date().toISOString()});}
+}

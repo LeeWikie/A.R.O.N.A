@@ -67,9 +67,9 @@ test('authorization precedes all requests; tools extract and search actual local
   const fetched = await tools.web_fetch.execute!({ signalIds: [id], url: f.base + '/redirect', mode: 'markdown', maxChars: 500 }, context) as { content: string; url: string };
   assert.ok(fetched && 'content' in fetched); assert.match(fetched.content, /Heading/); assert.doesNotMatch(fetched.content, /evil\(\)/); assert.match(fetched.content, /untrusted external data/); assert.match(fetched.url, /article$/);
   const results = await tools.web_search.execute!({ signalIds: [id], query: 'fixture', count: 5 }, context) as { content: string; count: number };
-  assert.ok(results && 'content' in results); assert.match(results.content, /example.org\/page/); assert.equal(results.count, 1);
+  assert.ok(results && 'content' in results); assert.match(results.content, /example.org\/page/); assert.equal(results.count, 2);assert.match(results.content,/"title":"bad"/);assert.match(results.content,/"urlAvailable":false/);assert.match(results.content,/did not provide a usable HTTP\(S\) source URL/);
   const unavailable = createWebTools({ authorize() {} });
-  assert.deepEqual(await unavailable.web_search.execute!({ signalIds: [id], query: 'x', count: 5 }, context), { status: 'not configured' });
+  assert.deepEqual(await unavailable.web_search.execute!({ signalIds: [id], query: 'x', count: 5 }, context), { status: 'not configured',isError:true });
 });
 
 

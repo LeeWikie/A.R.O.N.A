@@ -1,6 +1,6 @@
-import { fuzzyMatch } from "@earendil-works/pi-tui";
-// Adapted from Pi coding-agent session-selector-search.ts, commit 9ee7586a95f5e653ae279c3b8f20938faf3639a1.
+// Pi coding-agent 1.5.1, modes/interactive/components/session-selector-search.ts.
 // Copyright (c) 2025 Mario Zechner; MIT license in LICENSE.
+import { fuzzyMatch } from "@earendil-works/pi-tui";
 export interface SessionInfo {
 	id: string;
 	name?: string;
@@ -12,6 +12,8 @@ export interface SessionInfo {
 	messageCount?: number;
 	firstMessage?: string;
 }
+
+
 
 export type SortMode = "threaded" | "recent" | "relevance";
 
@@ -231,12 +233,12 @@ export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): M
 	return { matches: true, score: totalScore };
 }
 
-export function filterAndSortSessions(
-	sessions: SessionInfo[],
+export function filterAndSortSessions<T extends SessionInfo>(
+	sessions: T[],
 	query: string,
 	sortMode: SortMode,
 	nameFilter: NameFilter = "all",
-): SessionInfo[] {
+): T[] {
 	const nameFiltered =
 		nameFilter === "all" ? sessions : sessions.filter((session) => matchesNameFilter(session, nameFilter));
 	const trimmed = query.trim();
@@ -247,7 +249,7 @@ export function filterAndSortSessions(
 
 	// Recent mode: filter only, keep incoming order.
 	if (sortMode === "recent") {
-		const filtered: SessionInfo[] = [];
+		const filtered: T[] = [];
 		for (const s of nameFiltered) {
 			const res = matchSession(s, parsed);
 			if (res.matches) filtered.push(s);
@@ -256,7 +258,7 @@ export function filterAndSortSessions(
 	}
 
 	// Relevance mode: sort by score, tie-break by modified desc.
-	const scored: { session: SessionInfo; score: number }[] = [];
+	const scored: { session: T; score: number }[] = [];
 	for (const s of nameFiltered) {
 		const res = matchSession(s, parsed);
 		if (!res.matches) continue;

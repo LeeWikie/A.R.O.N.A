@@ -42,12 +42,12 @@ test('whole tasks use independent native sessions, real filesystem tools and reu
   fs.writeFileSync(path.join(dir, 'workspace/input.txt'), 'fixture input');
   fs.writeFileSync(path.join(dir,'workspace/input-2.txt'),'second fixture input');
   try {
-    const task = await core.createTask({ title: 'Read fixture', content: 'Read input.txt and report its content.' }, { sourceSignalIds: [], returnContextId: 'main' }, 'fixture-task');
+    const task = await core.submitTask({ title: 'Read fixture', content: 'Read input.txt and report its content.', returnContextId: 'main' }, 'fixture-task');
     assert.ok(task.nativeTaskId); assert.notEqual(task.contextId, 'main');
     const result = await until(() => core.runtime.task(task.id), value => !['pending', 'running', 'waiting'].includes(value.status));
     assert.equal(result.status, 'succeeded', JSON.stringify(core.runtime.events(result.contextId).filter(x => /tool|error/.test(x.kind))));
     assert.equal(core.methods.get('read-fixture').revision, 1);
-    const second = await core.createTask({ title: 'Read another fixture', content: 'Read input-2.txt using the known method.' }, { sourceSignalIds: [], returnContextId: 'main' }, 'fixture-task-2');
+    const second = await core.submitTask({ title: 'Read another fixture', content: 'Read input-2.txt using the known method.', returnContextId: 'main' }, 'fixture-task-2');
     assert.notEqual(second.contextId, task.contextId);
     assert.equal((await until(() => core.runtime.task(second.id), value => value.status === 'succeeded')).status, 'succeeded');
     assert.ok(core.runtime.events(second.contextId,0,1000).some(event=>event.kind==='tool_end'&&JSON.stringify(event.data).includes('Read the named input file, check content')),'native Skill instructions must actually be loaded');

@@ -1,0 +1,370 @@
+diff --git a/dist/client-BTIWJvaF.d.mts b/dist/client-BTIWJvaF.d.mts
+index 992c6ac6471c0eceb4eb60e3a9ebc71ac98e663d..1d8efdff3f8e535ecc506df104822013d1da69f3 100644
+--- a/dist/client-BTIWJvaF.d.mts
++++ b/dist/client-BTIWJvaF.d.mts
+@@ -276,6 +276,8 @@ declare function getSupportedElicitationModes(capabilities: ClientCapabilities['
+   supportsUrlMode: boolean;
+ };
+ type ClientOptions = ProtocolOptions & {
++  /** Preserve catalog business fields after native validation. Frozen for this client and its existing cache partition. */
++  preserveCatalogFields?: boolean;
+   /**
+    * Capabilities to advertise as being supported by this client.
+    */
+@@ -456,6 +458,8 @@ type ConnectOptions = RequestOptions & {
+  * `listResourceTemplates()` / `readResource()`). See {@linkcode CacheMode}.
+  */
+ type CacheableRequestOptions = RequestOptions & {
++  /** Return exactly one native list page, including the first page. */
++  pagination?: "page";
+   /**
+    * `'use'` (default) serves a still-fresh cached entry without a round
+    * trip; `'refresh'` always fetches and re-stores; `'bypass'` fetches
+@@ -473,6 +477,8 @@ type CacheableRequestOptions = RequestOptions & {
+  * prior `tools/list`.
+  */
+ type CallToolRequestOptions = RequestOptions & {
++  /** Synchronous read-only observation of an independent copy before the original output-schema validation. */
++  onResult?: (result: CallToolResult) => void;
+   /**
+    * The tool definition to use for SEP-2243 `Mcp-Param-*` header mirroring on
+    * a 2026-07-28 connection over Streamable HTTP, AND for output-schema
+@@ -967,6 +973,8 @@ declare class Client extends Protocol<ClientContext> {
+    * unbounded).
+    */
+   readResource(params: ReadResourceRequest['params'], options?: CacheableRequestOptions): Promise<ReadResourceResult>;
++  /** Returns the original cache disposition with the validated resource result. */
++  readResourceWithMetadata(params: ReadResourceRequest['params'], options?: CacheableRequestOptions): Promise<{ result: ReadResourceResult; cached: boolean }>;
+   private _readResource;
+   /** Subscribes to change notifications for a resource. The server must support resource subscriptions. */
+   subscribeResource(params: SubscribeRequest['params'], options?: RequestOptions): Promise<EmptyResult>;
+diff --git a/dist/client-yR_t4i05.d.cts b/dist/client-yR_t4i05.d.cts
+index 0326e73c02db1ebc9d07da5817a06dd7780d2be4..068e153d13a283c7d25676faa6767951fd9a3504 100644
+--- a/dist/client-yR_t4i05.d.cts
++++ b/dist/client-yR_t4i05.d.cts
+@@ -276,6 +276,8 @@ declare function getSupportedElicitationModes(capabilities: ClientCapabilities['
+   supportsUrlMode: boolean;
+ };
+ type ClientOptions = ProtocolOptions & {
++  /** Preserve catalog business fields after native validation. Frozen for this client and its existing cache partition. */
++  preserveCatalogFields?: boolean;
+   /**
+    * Capabilities to advertise as being supported by this client.
+    */
+@@ -456,6 +458,8 @@ type ConnectOptions = RequestOptions & {
+  * `listResourceTemplates()` / `readResource()`). See {@linkcode CacheMode}.
+  */
+ type CacheableRequestOptions = RequestOptions & {
++  /** Return exactly one native list page, including the first page. */
++  pagination?: "page";
+   /**
+    * `'use'` (default) serves a still-fresh cached entry without a round
+    * trip; `'refresh'` always fetches and re-stores; `'bypass'` fetches
+@@ -473,6 +477,8 @@ type CacheableRequestOptions = RequestOptions & {
+  * prior `tools/list`.
+  */
+ type CallToolRequestOptions = RequestOptions & {
++  /** Synchronous read-only observation of an independent copy before the original output-schema validation. */
++  onResult?: (result: CallToolResult) => void;
+   /**
+    * The tool definition to use for SEP-2243 `Mcp-Param-*` header mirroring on
+    * a 2026-07-28 connection over Streamable HTTP, AND for output-schema
+@@ -967,6 +973,8 @@ declare class Client extends Protocol<ClientContext> {
+    * unbounded).
+    */
+   readResource(params: ReadResourceRequest['params'], options?: CacheableRequestOptions): Promise<ReadResourceResult>;
++  /** Returns the original cache disposition with the validated resource result. */
++  readResourceWithMetadata(params: ReadResourceRequest['params'], options?: CacheableRequestOptions): Promise<{ result: ReadResourceResult; cached: boolean }>;
+   private _readResource;
+   /** Subscribes to change notifications for a resource. The server must support resource subscriptions. */
+   subscribeResource(params: SubscribeRequest['params'], options?: RequestOptions): Promise<EmptyResult>;
+diff --git a/dist/public-C-9H-ftO.cjs b/dist/public-C-9H-ftO.cjs
+index 2427ea1fbf85eccf15bfb804aa80a8d7381232e7..4df23d89b5fb5dc1ed0884747298e25c13175203 100644
+--- a/dist/public-C-9H-ftO.cjs
++++ b/dist/public-C-9H-ftO.cjs
+@@ -2776,7 +2776,7 @@ var Client = class extends require_src.Protocol {
+ 		this._versionNegotiation = options?.versionNegotiation;
+ 		this._supportedProtocolVersionsOption = options?.supportedProtocolVersions;
+ 		this._inputRequiredDriverConfig = require_src.resolveInputRequiredDriverConfig(options?.inputRequired);
+-		this._cache = new ClientResponseCache(options?.responseCacheStore ?? new InMemoryResponseCacheStore(), options?.responseCacheStore !== void 0, (error) => this._reportStoreError(error), options?.cachePartition ?? "");
++		this._cache = new ClientResponseCache(options?.responseCacheStore ?? new InMemoryResponseCacheStore(), options?.responseCacheStore !== void 0, (error) => this._reportStoreError(error), this._preserveCatalogFields ? JSON.stringify(["catalog-fields-v1", options?.cachePartition ?? ""]) : options?.cachePartition ?? "");
+ 		this._defaultCacheTtlMs = options?.defaultCacheTtlMs ?? 0;
+ 		this._listMaxPages = options?.listMaxPages ?? DEFAULT_LIST_MAX_PAGES;
+ 		if (options?.listChanged) this._listChangedConfig = options.listChanged;
+@@ -3312,7 +3312,7 @@ var Client = class extends require_src.Protocol {
+ 			console.debug("Client.listPrompts() called but server does not advertise prompts capability - returning empty list");
+ 			return { prompts: [] };
+ 		}
+-		if (params?.cursor !== void 0) return this.request({
++		if (options?.pagination === "page" || params?.cursor !== void 0) return this.request({
+ 			method: "prompts/list",
+ 			params
+ 		}, options);
+@@ -3351,7 +3351,7 @@ var Client = class extends require_src.Protocol {
+ 			console.debug("Client.listResources() called but server does not advertise resources capability - returning empty list");
+ 			return { resources: [] };
+ 		}
+-		if (params?.cursor !== void 0) return this.request({
++		if (options?.pagination === "page" || params?.cursor !== void 0) return this.request({
+ 			method: "resources/list",
+ 			params
+ 		}, options);
+@@ -3376,7 +3376,7 @@ var Client = class extends require_src.Protocol {
+ 			console.debug("Client.listResourceTemplates() called but server does not advertise resources capability - returning empty list");
+ 			return { resourceTemplates: [] };
+ 		}
+-		if (params?.cursor !== void 0) return this.request({
++		if (options?.pagination === "page" || params?.cursor !== void 0) return this.request({
+ 			method: "resources/templates/list",
+ 			params
+ 		}, options);
+@@ -3390,7 +3390,7 @@ var Client = class extends require_src.Protocol {
+ 	* methods' no-`cursor` auto-aggregate path. Page 1's result object is
+ 	* mutated in place (its items array is extended; `nextCursor` is
+ 	* cleared); page-1 metadata (`ttlMs`, `cacheScope`, `_meta`) is preserved.
+-	* A page with the same items and `nextCursor` as the previous page ends the walk;
++	* An empty cursor ends the walk; a repeated cursor rejects the partial aggregate;
+ 	* {@linkcode ClientOptions.listMaxPages} is a hard cap — hitting it
+ 	* throws, so a partial aggregate is never cached. The
+ 	* captured-generation guard skips the write when a `list_changed` landed
+@@ -3428,17 +3428,17 @@ var Client = class extends require_src.Protocol {
+ 	async _walkPages(method, fetchPage, items) {
+ 		const acc = await fetchPage(void 0);
+ 		let cursor = acc.nextCursor;
+-		let previous = acc;
++		const seenCursors = new Set();
+ 		let pages = 1;
+-		while (cursor !== void 0) {
++		while (cursor !== void 0 && cursor !== "") {
+ 			if (this._listMaxPages !== 0 && pages >= this._listMaxPages) throw new require_src.SdkError(require_src.SdkErrorCode.ListPaginationExceeded, `${method}: exceeded listMaxPages (${this._listMaxPages}); server pagination did not terminate`, {
+ 				method,
+ 				listMaxPages: this._listMaxPages
+ 			});
++			if (seenCursors.has(cursor)) throw new require_src.SdkError(require_src.SdkErrorCode.ListPaginationExceeded, `${method}: repeated pagination cursor; server pagination did not terminate`, { method });
++			seenCursors.add(cursor);
+ 			const page = await fetchPage(cursor);
+-			if (page.nextCursor === cursor && JSON.stringify(items(page)) === JSON.stringify(items(previous))) break;
+ 			items(acc).push(...items(page));
+-			previous = page;
+ 			cursor = page.nextCursor;
+ 			pages++;
+ 		}
+@@ -3560,6 +3560,8 @@ var Client = class extends require_src.Protocol {
+ 		const { result } = await this._readResource(params, options);
+ 		return result;
+ 	}
++	/** Returns the original cache disposition with the validated resource result. */
++	async readResourceWithMetadata(params, options) { return this._readResource(params, options); }
+ 	async _readResource(params, options) {
+ 		const hit = await this._serveFromCache("resources/read", params.uri, options);
+ 		if (hit !== void 0) return {
+@@ -3917,6 +3919,8 @@ var Client = class extends require_src.Protocol {
+ 				params
+ 			}, await buildSendOptions());
+ 		}
++		let observationFailed = false, observationError;
++		if (options?.onResult) try { options.onResult(structuredClone(result)); } catch (error) { observationFailed = true; observationError = error; }
+ 		const validator = compiled !== void 0 && compiled.ok ? compiled.validator : void 0;
+ 		if (validator) {
+ 			if (result.structuredContent === void 0 && !result.isError) throw new require_src.ProtocolError(require_src.ProtocolErrorCode.InvalidRequest, `Tool ${params.name} has an output schema but did not return structured content`);
+@@ -3928,6 +3932,7 @@ var Client = class extends require_src.Protocol {
+ 				throw new require_src.ProtocolError(require_src.ProtocolErrorCode.InvalidParams, `Failed to validate structured content: ${error instanceof Error ? error.message : String(error)}`);
+ 			}
+ 		}
++		if (observationFailed) throw Object.assign(new Error("MCP result observation failed after the tool result was received; the operation was not replayed.", { cause: observationError }), { code: "MCP_RESULT_OBSERVER_FAILED", packetReceived: true, validated: true });
+ 		return result;
+ 	}
+ 	/**
+@@ -3962,7 +3967,7 @@ var Client = class extends require_src.Protocol {
+ 			console.debug("Client.listTools() called but server does not advertise tools capability - returning empty list");
+ 			return { tools: [] };
+ 		}
+-		if (params?.cursor !== void 0) {
++		if (options?.pagination === "page" || params?.cursor !== void 0) {
+ 			const page = await this.request({
+ 				method: "tools/list",
+ 				params
+diff --git a/dist/public-CvV4ZHkX.mjs b/dist/public-CvV4ZHkX.mjs
+index fdb69ef9ee42ad4e1019cb4c9c727617286fe916..7edf3dac4ede5bb7080e07e12bd6e51639c0ef46 100644
+--- a/dist/public-CvV4ZHkX.mjs
++++ b/dist/public-CvV4ZHkX.mjs
+@@ -2773,7 +2773,7 @@ var Client = class extends Protocol {
+ 		this._versionNegotiation = options?.versionNegotiation;
+ 		this._supportedProtocolVersionsOption = options?.supportedProtocolVersions;
+ 		this._inputRequiredDriverConfig = resolveInputRequiredDriverConfig(options?.inputRequired);
+-		this._cache = new ClientResponseCache(options?.responseCacheStore ?? new InMemoryResponseCacheStore(), options?.responseCacheStore !== void 0, (error) => this._reportStoreError(error), options?.cachePartition ?? "");
++		this._cache = new ClientResponseCache(options?.responseCacheStore ?? new InMemoryResponseCacheStore(), options?.responseCacheStore !== void 0, (error) => this._reportStoreError(error), this._preserveCatalogFields ? JSON.stringify(["catalog-fields-v1", options?.cachePartition ?? ""]) : options?.cachePartition ?? "");
+ 		this._defaultCacheTtlMs = options?.defaultCacheTtlMs ?? 0;
+ 		this._listMaxPages = options?.listMaxPages ?? DEFAULT_LIST_MAX_PAGES;
+ 		if (options?.listChanged) this._listChangedConfig = options.listChanged;
+@@ -3309,7 +3309,7 @@ var Client = class extends Protocol {
+ 			console.debug("Client.listPrompts() called but server does not advertise prompts capability - returning empty list");
+ 			return { prompts: [] };
+ 		}
+-		if (params?.cursor !== void 0) return this.request({
++		if (options?.pagination === "page" || params?.cursor !== void 0) return this.request({
+ 			method: "prompts/list",
+ 			params
+ 		}, options);
+@@ -3348,7 +3348,7 @@ var Client = class extends Protocol {
+ 			console.debug("Client.listResources() called but server does not advertise resources capability - returning empty list");
+ 			return { resources: [] };
+ 		}
+-		if (params?.cursor !== void 0) return this.request({
++		if (options?.pagination === "page" || params?.cursor !== void 0) return this.request({
+ 			method: "resources/list",
+ 			params
+ 		}, options);
+@@ -3373,7 +3373,7 @@ var Client = class extends Protocol {
+ 			console.debug("Client.listResourceTemplates() called but server does not advertise resources capability - returning empty list");
+ 			return { resourceTemplates: [] };
+ 		}
+-		if (params?.cursor !== void 0) return this.request({
++		if (options?.pagination === "page" || params?.cursor !== void 0) return this.request({
+ 			method: "resources/templates/list",
+ 			params
+ 		}, options);
+@@ -3387,7 +3387,7 @@ var Client = class extends Protocol {
+ 	* methods' no-`cursor` auto-aggregate path. Page 1's result object is
+ 	* mutated in place (its items array is extended; `nextCursor` is
+ 	* cleared); page-1 metadata (`ttlMs`, `cacheScope`, `_meta`) is preserved.
+-	* A page with the same items and `nextCursor` as the previous page ends the walk;
++	* An empty cursor ends the walk; a repeated cursor rejects the partial aggregate;
+ 	* {@linkcode ClientOptions.listMaxPages} is a hard cap — hitting it
+ 	* throws, so a partial aggregate is never cached. The
+ 	* captured-generation guard skips the write when a `list_changed` landed
+@@ -3425,17 +3425,17 @@ var Client = class extends Protocol {
+ 	async _walkPages(method, fetchPage, items) {
+ 		const acc = await fetchPage(void 0);
+ 		let cursor = acc.nextCursor;
+-		let previous = acc;
++		const seenCursors = new Set();
+ 		let pages = 1;
+-		while (cursor !== void 0) {
++		while (cursor !== void 0 && cursor !== "") {
+ 			if (this._listMaxPages !== 0 && pages >= this._listMaxPages) throw new SdkError(SdkErrorCode.ListPaginationExceeded, `${method}: exceeded listMaxPages (${this._listMaxPages}); server pagination did not terminate`, {
+ 				method,
+ 				listMaxPages: this._listMaxPages
+ 			});
++			if (seenCursors.has(cursor)) throw new SdkError(SdkErrorCode.ListPaginationExceeded, `${method}: repeated pagination cursor; server pagination did not terminate`, { method });
++			seenCursors.add(cursor);
+ 			const page = await fetchPage(cursor);
+-			if (page.nextCursor === cursor && JSON.stringify(items(page)) === JSON.stringify(items(previous))) break;
+ 			items(acc).push(...items(page));
+-			previous = page;
+ 			cursor = page.nextCursor;
+ 			pages++;
+ 		}
+@@ -3557,6 +3557,8 @@ var Client = class extends Protocol {
+ 		const { result } = await this._readResource(params, options);
+ 		return result;
+ 	}
++	/** Returns the original cache disposition with the validated resource result. */
++	async readResourceWithMetadata(params, options) { return this._readResource(params, options); }
+ 	async _readResource(params, options) {
+ 		const hit = await this._serveFromCache("resources/read", params.uri, options);
+ 		if (hit !== void 0) return {
+@@ -3914,6 +3916,8 @@ var Client = class extends Protocol {
+ 				params
+ 			}, await buildSendOptions());
+ 		}
++		let observationFailed = false, observationError;
++		if (options?.onResult) try { options.onResult(structuredClone(result)); } catch (error) { observationFailed = true; observationError = error; }
+ 		const validator = compiled !== void 0 && compiled.ok ? compiled.validator : void 0;
+ 		if (validator) {
+ 			if (result.structuredContent === void 0 && !result.isError) throw new ProtocolError(ProtocolErrorCode.InvalidRequest, `Tool ${params.name} has an output schema but did not return structured content`);
+@@ -3925,6 +3929,7 @@ var Client = class extends Protocol {
+ 				throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Failed to validate structured content: ${error instanceof Error ? error.message : String(error)}`);
+ 			}
+ 		}
++		if (observationFailed) throw Object.assign(new Error("MCP result observation failed after the tool result was received; the operation was not replayed.", { cause: observationError }), { code: "MCP_RESULT_OBSERVER_FAILED", packetReceived: true, validated: true });
+ 		return result;
+ 	}
+ 	/**
+@@ -3959,7 +3964,7 @@ var Client = class extends Protocol {
+ 			console.debug("Client.listTools() called but server does not advertise tools capability - returning empty list");
+ 			return { tools: [] };
+ 		}
+-		if (params?.cursor !== void 0) {
++		if (options?.pagination === "page" || params?.cursor !== void 0) {
+ 			const page = await this.request({
+ 				method: "tools/list",
+ 				params
+diff --git a/dist/src-CeKsbNLO.mjs b/dist/src-CeKsbNLO.mjs
+index 4d390185ad2167d0e256fbf3aba1367a7e343bc0..1b61e1b5902d67bdc9fc78f009554252feca7c78 100644
+--- a/dist/src-CeKsbNLO.mjs
++++ b/dist/src-CeKsbNLO.mjs
+@@ -5626,7 +5626,7 @@ function liftWireOnlyMaterial(message, kind) {
+ * typedMapAlignment suite pins (the result map deliberately excludes the
+ * `tasks/*` methods, so the spec-method overload refuses them up front).
+ */
+-function codecResultValidator(codec, method) {
++function codecResultValidator(codec, method, preserveCatalogFields = false) {
+ 	const probe = codec.validateResult(method, void 0);
+ 	if (!probe.ok && probe.reason === "not-in-era") return void 0;
+ 	return { "~standard": {
+@@ -5634,7 +5634,7 @@ function codecResultValidator(codec, method) {
+ 		vendor: "mcp-wire-codec",
+ 		validate(value) {
+ 			const outcome = codec.validateResult(method, value);
+-			if (outcome.ok) return { value: outcome.value };
++			if (outcome.ok) return { value: preserveCatalogFields && (method === "resources/list" || method === "resources/templates/list" || method === "prompts/list") ? value : outcome.value };
+ 			return { issues: [{ message: outcome.reason === "invalid" ? outcome.message : `not-in-era: ${method}` }] };
+ 		}
+ 	} };
+@@ -5705,6 +5705,7 @@ var Protocol = class {
+ 	fallbackNotificationHandler;
+ 	constructor(_options) {
+ 		this._options = _options;
++		this._preserveCatalogFields = _options?.preserveCatalogFields === true;
+ 		this._supportedProtocolVersions = _options?.supportedProtocolVersions ?? SUPPORTED_PROTOCOL_VERSIONS;
+ 		this.setNotificationHandler("notifications/cancelled", (notification) => {
+ 			this._oncancel(notification);
+@@ -6083,7 +6084,7 @@ var Protocol = class {
+ 			return this._requestWithSchemaViaCodec(codec, request, schemaOrOptions, maybeOptions);
+ 		}
+ 		this._assertOutboundRequestInEra(codec, request.method);
+-		const validate = codecResultValidator(codec, request.method);
++		const validate = codecResultValidator(codec, request.method, this._preserveCatalogFields);
+ 		if (validate === void 0) throw new TypeError(`'${request.method}' is not a spec method; pass a result schema as the second argument to request().`);
+ 		return this._requestWithSchemaViaCodec(codec, request, validate, schemaOrOptions);
+ 	}
+diff --git a/dist/src-ohtppAR3.cjs b/dist/src-ohtppAR3.cjs
+index 7d9314447f98b6aea72649b4fed009fd306b8919..279ec8cedac11b76fdce7f0d874dcfe6a770631a 100644
+--- a/dist/src-ohtppAR3.cjs
++++ b/dist/src-ohtppAR3.cjs
+@@ -5627,7 +5627,7 @@ function liftWireOnlyMaterial(message, kind) {
+ * typedMapAlignment suite pins (the result map deliberately excludes the
+ * `tasks/*` methods, so the spec-method overload refuses them up front).
+ */
+-function codecResultValidator(codec, method) {
++function codecResultValidator(codec, method, preserveCatalogFields = false) {
+ 	const probe = codec.validateResult(method, void 0);
+ 	if (!probe.ok && probe.reason === "not-in-era") return void 0;
+ 	return { "~standard": {
+@@ -5635,7 +5635,7 @@ function codecResultValidator(codec, method) {
+ 		vendor: "mcp-wire-codec",
+ 		validate(value) {
+ 			const outcome = codec.validateResult(method, value);
+-			if (outcome.ok) return { value: outcome.value };
++			if (outcome.ok) return { value: preserveCatalogFields && (method === "resources/list" || method === "resources/templates/list" || method === "prompts/list") ? value : outcome.value };
+ 			return { issues: [{ message: outcome.reason === "invalid" ? outcome.message : `not-in-era: ${method}` }] };
+ 		}
+ 	} };
+@@ -5706,6 +5706,7 @@ var Protocol = class {
+ 	fallbackNotificationHandler;
+ 	constructor(_options) {
+ 		this._options = _options;
++		this._preserveCatalogFields = _options?.preserveCatalogFields === true;
+ 		this._supportedProtocolVersions = _options?.supportedProtocolVersions ?? _modelcontextprotocol_core_internal.SUPPORTED_PROTOCOL_VERSIONS;
+ 		this.setNotificationHandler("notifications/cancelled", (notification) => {
+ 			this._oncancel(notification);
+@@ -6084,7 +6085,7 @@ var Protocol = class {
+ 			return this._requestWithSchemaViaCodec(codec, request, schemaOrOptions, maybeOptions);
+ 		}
+ 		this._assertOutboundRequestInEra(codec, request.method);
+-		const validate = codecResultValidator(codec, request.method);
++		const validate = codecResultValidator(codec, request.method, this._preserveCatalogFields);
+ 		if (validate === void 0) throw new TypeError(`'${request.method}' is not a spec method; pass a result schema as the second argument to request().`);
+ 		return this._requestWithSchemaViaCodec(codec, request, validate, schemaOrOptions);
+ 	}

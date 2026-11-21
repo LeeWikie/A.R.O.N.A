@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { editorSpawn } from './windows-spawn.js';
 
 export async function editExternally(options: { command: string; args: string[]; content: string; signal: AbortSignal }): Promise<{ status: 'complete'; content: string } | { status: 'failed'; message: string }> {
   options.signal.throwIfAborted();
@@ -13,9 +14,19 @@ export async function editExternally(options: { command: string; args: string[];
     await fs.promises.writeFile(file, options.content, { encoding: 'utf8', mode: 0o600, flag: 'wx', signal: options.signal });
     const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; failed: boolean }>(resolve => {
       let failed = false;
-      const child = spawn(options.command, [...options.args, file], { stdio: 'inherit', shell: false, signal: options.signal, windowsHide: false });
+      const invocation = editorSpawn(options.command, [...options.args, file]);
+      const child = spawn(invocation.command, invocation.args, { stdio: 'inherit', shell: false, ...(process.platform === 'win32' ? {} : { signal: options.signal }), windowsHide: false, windowsVerbatimArguments: invocation.windowsVerbatimArguments });
+      const abort = () => {
+        if (!child.pid) return;
+        const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+        killer.once('error', () => { child.kill(); });
+      };
+      if (process.platform === 'win32') {
+        options.signal.addEventListener('abort', abort, { once: true });
+        if (options.signal.aborted) abort();
+      }
       child.once('error', () => { failed = true; });
-      child.once('close', (code, signal) => resolve({ code, signal, failed }));
+      child.once('close', (code, signal) => { options.signal.removeEventListener('abort', abort); resolve({ code, signal, failed }); });
     });
     options.signal.throwIfAborted();
     if (outcome.failed || outcome.code !== 0) return { status: 'failed', message: '外部编辑器未成功退出，原输入未改变。' };

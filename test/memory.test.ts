@@ -5,6 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { removeTemp } from './helpers.js';
 import { MastraLanguageModelV2Mock } from '@mastra/core/test-utils/llm-mock';
+import { buildMemoryEvidence } from '../src/memory/evidence.js';
+import type { ContextSnapshot } from '../src/memory/index.js';
+
+const fixtureEvidence = (source: Readonly<ContextSnapshot>) => buildMemoryEvidence({ source, gaps: [], entries: [
+  { kind: 'user-statement', origin: 'signal', content: '原始合成输入：蓝色\n原话：合成蓝色。', provenance: { contextId: source.contextId, runId: source.runId, signalId: 'fixture-blue' } },
+  { kind: 'tool-action', toolName: 'source_tool', toolCallId: 'original-call', input: { query: '原始查询' }, provenance: { contextId: source.contextId, runId: source.runId } },
+  { kind: 'tool-result', toolName: 'source_tool', toolCallId: 'original-call', output: '原始工具结果', provenance: { contextId: source.contextId, runId: source.runId } },
+  { kind: 'user-statement', origin: 'signal', content: '原始更正：红色\n更正：合成红色。', provenance: { contextId: source.contextId, runId: source.runId, signalId: 'fixture-red' } },
+] });
 
 test('memory inherits complete native context, publishes atomically, refreshes and keeps origins', { timeout: 40_000 }, async () => {
   const { Core } = await import('../src/core.js');
@@ -101,7 +110,7 @@ test('memory snapshots retain native tool exchanges and publication rolls back o
     return { content: [{ type: 'tool-call' as const, toolName: action.toolName, toolCallId: `synthetic-${step}`, input: JSON.stringify(action.input) }], finishReason: 'tool-calls' as const, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, warnings: [] };
   } });
   try {
-    await assert.rejects(memory.organize(job.id, () => model));
+    await assert.rejects(memory.organize(job.id, () => model, undefined, undefined, fixtureEvidence));
     assert.ok(sawFullSource, 'organizer must receive original input and native tool round trip');
     assert.equal(memory.version().generation, 0); assert.equal(memory.resident().text, '');
     assert.deepEqual(store.setting('memory-watermarks', {}), {});
@@ -115,7 +124,7 @@ test('memory snapshots retain native tool exchanges and publication rolls back o
     assert.equal(memory.jobs().find(x => x.id === retry.id)?.status, 'interrupted');
     assert.equal(memory.version().generation, 0);
     failPublication = false; step = 0;
-    const success = memory.newJob(first.runId); await memory.organize(success.id, () => model);
+    const success = memory.newJob(first.runId); await memory.organize(success.id, () => model, undefined, undefined, fixtureEvidence);
     assert.equal(memory.version().generation, 1);
     assert.deepEqual(memory.status().files.map(x => x.path), ['first.md', 'second.md']);
     assert.match(memory.resident().text, /one/); assert.match(memory.resident().text, /two/);
@@ -171,7 +180,7 @@ test('memory publication keeps unchanged versions, retains failed work and advan
       const action = actions[step++];
       return { content: action ? [{ type: 'tool-call' as const, ...action }] : [{ type: 'text' as const, text: 'done' }], finishReason: action ? 'tool-calls' as const : 'stop' as const, usage: { inputTokens: 10, outputTokens: 1, totalTokens: 11 }, warnings: [] };
     } });
-    return { job, promise: memory.organize(job.id, () => model, abort?.signal) };
+    return { job, promise: memory.organize(job.id, () => model, abort?.signal, undefined, fixtureEvidence) };
   };
   const write = (id: string, file: string, content: string): Action => ({ toolName: 'memory_write', toolCallId: id, input: JSON.stringify({ path: file, content }) });
   const commit = (id: string): Action => ({ toolName: 'memory_commit', toolCallId: `commit-${id}`, input: JSON.stringify({ sourceRunId: id, note: 'fixture' }) });

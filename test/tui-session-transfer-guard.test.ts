@@ -1,0 +1,8 @@
+import assert from'node:assert/strict';import fs from'node:fs';import os from'node:os';import path from'node:path';import test from'node:test';
+import{readSessionText}from'../src/tui/session-transfer.js';import{removeTemp}from'./helpers.js';
+
+test('the legacy file reader verifies visible identity before reading even when final-component no-follow is unavailable',async()=>{
+ const directory=fs.mkdtempSync(path.join(os.tmpdir(),'arona-legacy-import-guard-')),file=path.join(directory,'source.jsonl'),previous=file+'.previous',privateDirectory=path.join(directory,'.private'),foreign=path.join(privateDirectory,'foreign.jsonl');fs.mkdirSync(privateDirectory);fs.writeFileSync(file,'PUBLIC_FILE');fs.writeFileSync(foreign,'PRIVATE_CANARY_MUST_NOT_BE_READ');const original=fs.promises.open;let reads=0,swapped=false;
+ fs.promises.open=async(candidate,flags,mode)=>{if(String(candidate)===file&&!swapped){swapped=true;fs.renameSync(file,previous);fs.linkSync(foreign,file);}const handle=await original(candidate,typeof flags==='number'?flags&~(fs.constants.O_NOFOLLOW??0):flags,mode);return new Proxy(handle,{get(target,key){const value=Reflect.get(target,key,target);if(key==='readFile')return(...args:unknown[])=>{reads++;return Reflect.apply(target.readFile,target,args);};return typeof value==='function'?value.bind(target):value;}});};
+ try{await assert.rejects(readSessionText(file),/session_archive_changed/);assert.equal(swapped,true);assert.equal(reads,0);assert.equal(fs.readFileSync(previous,'utf8'),'PUBLIC_FILE');assert.equal(fs.readFileSync(foreign,'utf8'),'PRIVATE_CANARY_MUST_NOT_BE_READ');}finally{fs.promises.open=original;await removeTemp(directory);}
+});

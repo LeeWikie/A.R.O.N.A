@@ -72,12 +72,13 @@ test('chat and context management drive backend and cleanly stop', async () => {
     terminal.send('\r'); await wait();
     terminal.send('next\r'); await wait();
     assert.deepEqual(submissions, [['hello', 'main'], ['next', 'other']]);
-    terminal.send('/menu\r'); await wait(); terminal.send('切换模型\r'); await wait(); terminal.send('\r'); await wait(); terminal.send('\r'); await wait();
+    terminal.send('/menu\r'); await wait(); terminal.send('切换模型\r'); await wait(); terminal.send('\r'); await wait();
     assert.deepEqual(writes.find(x => x.route === '/contexts/other/model')?.body, { profileId: 'profile-1' });
     terminal.send('/menu\r'); await wait(); terminal.send('凭据\r'); await wait(); terminal.send('\r'); await wait(); terminal.send('FIXTURE_KEY\r'); await wait(); terminal.send('fixture-secret\r'); await wait();
     assert.deepEqual(writes.find(x => x.route === '/credentials/FIXTURE_KEY')?.body, { value: 'fixture-secret' });
     assert.equal(terminal.output.includes('fixture-secret'), false);
-    terminal.send('/menu\r'); await wait(); terminal.send('provider-auth\r'); await wait(); terminal.send('\r'); await wait(); terminal.send('\r'); await wait(); terminal.send('provider-secret\r'); await wait();
+    // 唯一登录方式直接进入密钥输入，不额外消费一次确认。
+    terminal.send('/menu\r'); await wait(); terminal.send('provider-auth\r'); await wait(); assert.ok(terminal.output.includes('Provider key')); terminal.send('provider-secret\r'); await wait();
     assert.deepEqual(writes.find(x => x.route === '/auth/jobs/job-1/respond')?.body, { value: 'provider-secret', promptId: 'prompt-1' });
     assert.equal(terminal.output.includes('provider-secret'), false);
     terminal.send('/quit\r'); await running;

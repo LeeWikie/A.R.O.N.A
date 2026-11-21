@@ -1,7 +1,7 @@
 allowBuilds:
-  '@google/genai': set this to true or false
+  '@google/genai': false
   esbuild: true
-  protobufjs: set this to true or false
+  protobufjs: false
 minimumReleaseAgeExclude:
   - '@ai-sdk/anthropic@4.0.94'
   - '@ai-sdk/openai@4.0.106'
@@ -10,7 +10,19 @@ minimumReleaseAgeExclude:
   - '@mastra/core@1.81.0'
   - '@mastra/libsql@1.28.0'
   - '@mastra/memory@1.40.0'
-  - '@earendil-works/pi-ai@1.5.0'
-  - '@earendil-works/pi-schema@1.5.0'
-  - '@earendil-works/pi-telemetry@1.5.0'
-  - '@earendil-works/pi-tui@1.5.0'
+  - '@earendil-works/pi-ai@1.5.1'
+  - '@earendil-works/pi-agent-core@1.5.1'
+  - '@earendil-works/pi-coding-agent@1.5.1'
+  - '@earendil-works/pi-schema@1.5.1'
+  - '@earendil-works/pi-telemetry@1.5.1'
+  - '@earendil-works/pi-tui@1.5.1'
+  - '@earendil-works/pi-codemode@1.5.1'
+  - '@earendil-works/pi-mcp@1.5.1'
+patchedDependencies:
+  '@earendil-works/pi-coding-agent@1.5.1': patches/@earendil-works__pi-coding-agent@1.5.1.patch
+  '@earendil-works/pi-tui@1.5.1': patches/@earendil-works__pi-tui@1.5.1.patch
+  '@mastra/core@1.81.0': patches/@mastra__core@1.81.0.patch
+  '@mastra/libsql@1.28.0': patches/@mastra__libsql@1.28.0.patch
+  '@mastra/mcp@2.7.0': patches/@mastra__mcp@2.7.0.patch
+  '@modelcontextprotocol/client@2.4.0': patches/@modelcontextprotocol__client@2.4.0.patch
+  fossil-delta@2.0.0: patches/fossil-delta@2.0.0.patch

@@ -21,7 +21,7 @@ class FakeTerminal implements Terminal {
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {} setProgramStatus() {}
 }
 
-test('UI queues, replaces, withdraws, and targets the observed run for steer', { timeout: 35_000 }, async () => {
+test('legacy Core UI queues, replaces, withdraws, and targets the observed run for steer', { timeout: 35_000 }, async () => {
   const a = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY'), b = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
   Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true }); Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'arona-tui-queue-'));
@@ -30,6 +30,7 @@ test('UI queues, replaces, withdraws, and targets the observed run for steer', {
   const core = await Core.open({ dataDir: directory, model, memoryEnabled: false });
   const server = serve({ fetch: createApp(core).fetch, hostname: '127.0.0.1', port: 0 }); if (!server.listening) await once(server, 'listening');
   const client = new Client(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, core.controlToken);
+  const handshake=client.handshake.bind(client);client.handshake=async(...args:Parameters<Client['handshake']>)=>{const result=await handshake(...args);return {...result,capabilities:result.capabilities.filter(capability=>capability!=='message-queue-editor')};};
   const terminal = new FakeTerminal(); const app = new TerminalApp(client, 'main', terminal);
   const target = app as unknown as { currentRunId?: string; queueCount: number; choose: () => Promise<string | undefined>; promptLong: () => Promise<string | undefined>; submit: (text: string) => Promise<void>; messageQueue: () => Promise<void> };
   let choices: string[] = []; target.choose = async () => choices.shift(); target.promptLong = async () => 'edited queue message';
@@ -58,7 +59,7 @@ test('UI queues, replaces, withdraws, and targets the observed run for steer', {
   }
 });
 
-test('Alt+Enter queues without a prompt, preview shows it, Alt+Up withdraws back into the editor', { timeout: 35_000 }, async () => {
+test('legacy Core Alt+Enter queues without a prompt, preview shows it, Alt+Up withdraws back into the editor', { timeout: 35_000 }, async () => {
   const a = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY'), b = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
   Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true }); Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'arona-tui-followup-'));
@@ -67,6 +68,7 @@ test('Alt+Enter queues without a prompt, preview shows it, Alt+Up withdraws back
   const core = await Core.open({ dataDir: directory, model, memoryEnabled: false });
   const server = serve({ fetch: createApp(core).fetch, hostname: '127.0.0.1', port: 0 }); if (!server.listening) await once(server, 'listening');
   const client = new Client(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, core.controlToken);
+  const handshake=client.handshake.bind(client);client.handshake=async(...args:Parameters<Client['handshake']>)=>{const result=await handshake(...args);return {...result,capabilities:result.capabilities.filter(capability=>capability!=='message-queue-editor')};};
   const terminal = new FakeTerminal(); const app = new TerminalApp(client, 'main', terminal);
   const target = app as unknown as { currentRunId?: string; queueCount: number; choose: (title: string) => Promise<string | undefined>; submit: (text: string) => Promise<void>;
     editor: { getText(): string; setText(text: string): void }; queuePreview: { children: Array<{ text?: string }> }; transcript: { children: Array<{ text?: string }> } };
@@ -90,7 +92,7 @@ test('Alt+Enter queues without a prompt, preview shows it, Alt+Up withdraws back
     target.editor.setText('draft in progress');
     terminal.input('\x1b[1;3A');
     await until(() => core.queuedMessages('main').length, count => count === 0);
-    await until(() => target.editor.getText(), text => text.includes('draft in progress'));
+    await until(() => target.editor.getText(), text => text === 'first follow-up\n\nsecond follow-up\n\ndraft in progress');
     assert.equal(target.editor.getText(), 'first follow-up\n\nsecond follow-up\n\ndraft in progress');
     await until(() => preview(), text => text === '');
     for (const row of core.store.db.prepare("SELECT id FROM signals WHERE json_extract(body,'$.content') LIKE '%follow-up'").all()) assert.equal(core.store.getSignal(String(row.id))?.status, 'cancelled');

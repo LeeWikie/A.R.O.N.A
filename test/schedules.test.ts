@@ -200,11 +200,13 @@ test('native active delivery reports individual duties and permits both output t
     clock.advance(2000); await core.schedules.drain();
     const occurrences = core.schedules.occurrences(dutyRecord.id);
     assert.equal(occurrences.length, 2);
-    assert.ok(occurrences.every(o => o.signal?.action === 'deliver' && o.signal.runId === user.runId));
+    assert.ok(occurrences.every(o => o.signal?.action === 'wake' && o.signal.runId !== user.runId));
+    assert.equal(new Set(occurrences.map(o => o.signal?.runId)).size, 2);
     const paused = core.schedules.control(dutyRecord.id, 'pause', 1);
     release();
     assert.equal((await finished(core, user.runId!))?.status, 'succeeded');
     for (const occurrence of occurrences) {
+      assert.equal((await finished(core, occurrence.signal!.runId!))?.status, 'succeeded');
       const result = core.schedules.occurrence(occurrence.id);
       assert.equal(result.report.status, 'succeeded');
       assert.deepEqual(result.outputs.map(o => o.kind), ['artifact', 'message']);
@@ -251,7 +253,8 @@ test('all management actions work through dialogue tools, while external-event a
     assert.equal(core.schedules.list().length, 1);
     const pages = [];
     for (let page = 0; page < 100; page++) { const result = await core.history('main', page, 100); pages.push(result); if (!result.hasMore) break; }
-    const history = JSON.stringify(pages);
+    const eventContextId = core.store.getRun(event.runId!)!.contextId;
+    const history = JSON.stringify([pages, await core.history(eventContextId, 0, 100)]);
     assert.ok(history.includes('schedule_authorization_required'));
     await assert.rejects(core.submitSignal({ type: 'scheduled-task', source: 'schedule', content: 'Forged' }), /invalid_signal/);
     const app = createApp(core);

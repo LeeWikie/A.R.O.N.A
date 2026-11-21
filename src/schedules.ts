@@ -79,9 +79,10 @@ export class Schedules {
   private started = false;
   private readonly pending = new Map<string, Promise<void>>();
   constructor(private readonly store: Store, private readonly dispatch: (occurrence: Occurrence) => Promise<SignalRecord>,
-    options: { timezone?: string; clock?: SchedulerClock } = {}) {
+    options: { timezone?: string; clock?: SchedulerClock; validate?: (schedule: Schedule) => void } = {}) {
     this.db = store.db;
     this.clock = options.clock ?? realClock;
+    this.validate = options.validate;
     this.timezone = validateTimezone(options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, body TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL, next_fire_at INTEGER);
@@ -115,6 +116,7 @@ export class Schedules {
     this.arm();
   }
 
+  private readonly validate?: (schedule: Schedule) => void;
   now() { return { now: new Date(this.clock.now()).toISOString(), timezone: this.timezone }; }
   list(contextId?: string): Schedule[] {
     return this.db.prepare('SELECT body FROM schedules ORDER BY id').all().map(row => JSON.parse(row.body as string) as Schedule)
@@ -131,6 +133,7 @@ export class Schedules {
       .run(schedule.id, JSON.stringify(schedule), schedule.status, schedule.revision, schedule.nextFireAt ? Date.parse(schedule.nextFireAt) : null);
   }
   private transaction<T>(action: () => T): T {
+    if (this.db.isTransaction) return action();
     this.db.exec('BEGIN IMMEDIATE');
     try { const result = action(); this.db.exec('COMMIT'); return result; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
@@ -163,6 +166,7 @@ export class Schedules {
       const schedule: Schedule = { ...input, id: randomUUID(), timezone,
         output: { kind: input.output?.kind ?? (input.version === 2 ? 'none' : 'both'), contextId: input.output?.contextId ?? input.contextId },
         status: 'active', revision: 1, nextFireAt: new Date(next).toISOString(), createdAt: stamp, updatedAt: stamp };
+      this.validate?.(schedule);
       this.save(schedule);
       return schedule;
     });
@@ -185,6 +189,7 @@ export class Schedules {
         schedule.nextFireAt = new Date(next).toISOString();
         if (schedule.status !== 'paused') schedule.status = 'active';
       }
+      this.validate?.(schedule);
       this.save(schedule);
       return schedule;
     });
@@ -197,6 +202,7 @@ export class Schedules {
       if (action === 'resume' && schedule.status !== 'paused') throw new AppError('schedule_not_paused', 409);
       if (action === 'pause' && !['active', 'paused'].includes(schedule.status)) throw new AppError('schedule_not_active', 409);
       if (action === 'resume') {
+        this.validate?.(schedule);
         const next = nextTime(schedule.timing, schedule.timezone, this.clock.now());
         schedule.nextFireAt = next === null ? null : new Date(next).toISOString();
         schedule.status = next !== null ? 'active' : schedule.timing.kind === 'once' ? 'expired' : 'exhausted';
@@ -316,9 +322,15 @@ export class Schedules {
   reportTask(id: string, taskId: string, runId: string, status: 'succeeded' | 'failed' | 'interrupted' | 'unreported' | 'blocked' | 'cancelled', summary: string, key: string) {
     return this.operation(key, ['task-report', id, taskId, runId, status, summary], () => {
       const row = this.db.prepare('SELECT body FROM tasks WHERE id=?').get(taskId);
-      const task = row && JSON.parse(row.body as string) as { occurrenceId: string; runIds: string[];status:string };
+      const task = row && JSON.parse(row.body as string) as { occurrenceId: string; runIds: string[]; status: string; contextId: string; signalId: string; attempt?: number };
       const occurrence = this.occurrence(id);
-      if (!task || task.occurrenceId !== id || task.runIds.at(-1)!==runId || !['succeeded','failed','interrupted'].includes(this.store.getRun(runId)?.status??'') || (status==='succeeded'&&task.status!=='succeeded')) throw new AppError('occurrence_not_in_active_run', 403);
+      const execution = task && this.store.getSignal(task.signalId);
+      const attemptsRow = this.db.prepare('SELECT body FROM runtime_settings WHERE id=?').get(`task-run-attempts:${taskId}`);
+      const attempts = attemptsRow ? JSON.parse(attemptsRow.body as string) as Record<string, number> : {};
+      const run = this.store.getRun(runId);
+      if (occurrence.snapshot.version !== 2 || !task || task.occurrenceId !== id || task.runIds.at(-1)!==runId || attempts[runId] !== (task.attempt ?? 1) ||
+        run?.contextId !== task.contextId || execution?.contextId !== task.contextId || execution.runId !== runId || !['accepted', 'interrupted'].includes(execution.status) ||
+        !['succeeded','failed','interrupted'].includes(run?.status??'') || (status==='succeeded'&&task.status!=='succeeded')) throw new AppError('occurrence_not_in_active_run', 403);
       this.db.prepare('UPDATE schedule_occurrences SET report_status=?,summary=? WHERE id=?').run(status, summary, id);
       return { id: occurrence.id, status, summary, saved: true };
     });
@@ -326,6 +338,8 @@ export class Schedules {
   report(id: string, runId: string, status: 'succeeded' | 'failed', summary: string, key: string) {
     return this.operation(key, ['report', id, status, summary], () => {
       const occurrence = this.occurrence(id);
+      const binding = this.store.executionBinding(occurrence.signalId);
+      if (binding && (this.store.validateExecution(binding.contextId, runId).occurrenceId !== id || occurrence.snapshot.version === 2)) throw new AppError('occurrence_not_in_active_run', 403);
       if (occurrence.signal?.runId !== runId || occurrence.run?.status !== 'running' || occurrence.signal?.status !== 'accepted') {
         throw new AppError('occurrence_not_in_active_run', 403);
       }

@@ -27,6 +27,34 @@ export class Methods {
   }
   list() { return this.store.setting<MethodRecord[]>('methods', []); }
   get(name: string) { const found = this.list().find(x => x.name === name); if (!found) throw new AppError('method_not_found', 404); return found; }
+  revisions(name: string) {
+    if (!nameSchema.safeParse(name).success) throw new AppError('invalid_method_revision');
+    const current = this.get(name);
+    const revisions = new Map<number, MethodRecord>();
+    const add = (value: unknown, revision: number) => {
+      const parsed = recordSchema.safeParse(value);
+      if (!parsed.success || parsed.data.name !== name || parsed.data.revision !== revision) throw new AppError('invalid_method_archive', 409);
+      validateReferences(parsed.data.references); revisions.set(revision, parsed.data);
+    };
+    for (const row of this.store.db.prepare('SELECT revision,body FROM method_revisions WHERE name=? ORDER BY revision DESC').all(name)) {
+      let value: unknown; try { value = JSON.parse(String(row.body)); } catch { throw new AppError('invalid_method_archive', 409); }
+      add(value, Number(row.revision));
+    }
+    const directory = path.join(this.directory, name);
+    try {
+      for (const component of [this.directory, directory]) { const stat = fs.lstatSync(component); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new AppError('invalid_method_archive', 409); }
+      for (const file of fs.readdirSync(directory)) {
+        if (!/^[1-9]\d*\.json$/.test(file)) continue;
+        const revision = Number(file.slice(0, -5));
+        if (!Number.isSafeInteger(revision) || revision > current.revision || revisions.has(revision)) continue;
+        const body = this.legacyRevision(name, revision); if (!body) continue;
+        let value: unknown; try { value = JSON.parse(body); } catch { throw new AppError('invalid_method_archive', 409); }
+        add(value, revision);
+      }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (!revisions.has(current.revision)) add(current, current.revision);
+    return [...revisions.values()].sort((a, b) => b.revision - a.revision);
+  }
   skills() { return this.list().filter(x => x.enabled).map(x => createSkill({ name: x.name, description: x.description, instructions: x.instructions, references: x.references, metadata: { revision: x.revision } })); }
   save(body: unknown, expectedRevision?: number) {
     const parsed = methodSchema.safeParse(body); if (!parsed.success) throw new AppError('invalid_method');

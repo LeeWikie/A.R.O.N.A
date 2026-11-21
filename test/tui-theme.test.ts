@@ -99,7 +99,8 @@ test('model state reports effective thinking and Shift+Tab cycles supported leve
     core.providerRegistry.setProvider(faux.provider);
     core.configure('model', { id: 'think', name: 'Thinker', providerId: 'fake', modelId: 'reasoner', defaultThinkingLevel: 'high' });
     await core.switchModel('main', 'think');
-    assert.deepEqual(await core.modelState('main'), { contextId: 'main', profileId: 'think', name: 'Thinker', modelId: 'reasoner', thinkingLevel: 'high', source: 'profile', unavailable: null, configuredProfiles: 1, providerId: 'fake' });
+    assert.deepEqual(await core.modelState('main'), { contextId: 'main', profileId: 'think', name: 'Thinker', modelId: 'reasoner', thinkingLevel: 'high', source: 'profile', unavailable: null, configuredProfiles: 1, providerId: 'fake',
+      requestedThinkingLevel: 'high', defaultThinkingLevel: 'high', thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'], nextThinkingLevel: 'off', supportsThinking: true, thinkingCapabilitySource: 'provider-metadata' });
     await core.switchModel('main', 'think', 'low');
     assert.equal((await core.modelState('main')).source, 'session');
     await core.switchModel('main', 'think', null);
@@ -122,10 +123,10 @@ test('model state reports effective thinking and Shift+Tab cycles supported leve
       assert.equal(target.model?.thinkingLevel, 'high');
       assert.ok(target.footer.render(120).join('\n').includes('Thinker • high'));
       await target.cycleThinking();
-      assert.deepEqual(writes.at(-1), { route: '/contexts/main/model', body: { profileId: 'think', thinkingLevel: 'off' } }, 'wraps after the last supported level, skipping levels we do not expose');
+      assert.deepEqual(writes.at(-1), { route: '/contexts/main/model', body: { profileId: 'think', thinkingLevel: 'off' } }, 'wraps after the last supported level');
       assert.equal(target.model?.thinkingLevel, 'off');
       await target.cycleThinking();
-      assert.equal((writes.at(-1)!.body as { thinkingLevel: string }).thinkingLevel, 'low');
+      assert.equal((writes.at(-1)!.body as { thinkingLevel: string }).thinkingLevel, 'minimal');
     } finally { await app.stop(); }
   } finally { await core.close(); await removeTemp(directory); }
 });

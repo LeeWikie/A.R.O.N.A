@@ -1,0 +1,11 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { InputAssetUploads, type InputAssetMetadata } from '../src/asset-uploads.js';
+const directory = process.env.ASSET_PUBLICATION_DIRECTORY!;
+const metadata = JSON.parse(fs.readFileSync(path.join(directory, 'metadata.json'), 'utf8')) as InputAssetMetadata;
+const bytes = fs.readFileSync(path.join(directory, 'original.bin')), db = new DatabaseSync(path.join(directory, 'records.sqlite'));
+db.exec('CREATE TABLE IF NOT EXISTS asset_records(id TEXT PRIMARY KEY,body TEXT NOT NULL);');
+const link = fs.linkSync;
+fs.linkSync = (from, to) => { link(from, to); process.send?.({ type: 'linked' }); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); };
+new InputAssetUploads(db, path.join(directory, 'assets')).publish(metadata, bytes);

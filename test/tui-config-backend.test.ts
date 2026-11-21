@@ -34,7 +34,7 @@ test('configuration forms round-trip through real Core schemas', { timeout: 30_0
     core.configure('model', { id: 'fixture', name: 'Fixture', protocol: 'responses', baseURL: 'https://example.invalid/v1', modelId: 'fixture', apiKeyEnv: 'FIXTURE_KEY', authHeader: 'bearer', thinking: { low: { reasoningEffort: 'low' } } });
     await core.configure('mcp', { id: 'fixture', enabled: true, url: 'https://example.invalid/mcp', headersEnv: { Authorization: 'OLD_KEY' } });
     const schedule = core.schedules.create({ name: 'Fixture duty', task: 'Synthetic task', timing: { kind: 'once', at: '2099-01-01T00:00:00Z' }, contextId: 'main', output: { kind: 'message' } });
-    choices = ['fixture', 'thinking', 'high', 'set', 'high']; await target.editModel();
+    choices = ['thinking', 'high', 'set', 'high']; await target.editModel();
     const profile = core.models.profile('fixture'); assert.ok(profile && 'thinking' in profile); assert.deepEqual(profile.thinking, { low: { reasoningEffort: 'low' }, high: { reasoningEffort: 'high' } });
     const model = core.providerRegistry.getModels().find(item => getSupportedThinkingLevels(item).includes('high')); assert.ok(model);
     core.configure('model', { id: 'provider-fixture', name: 'Provider fixture', providerId: model.provider, modelId: model.id });
@@ -60,7 +60,7 @@ test('configuration forms round-trip through real Core schemas', { timeout: 30_0
     assert.equal(core.methods.get('fixture-method').revision, 2); assert.equal(core.methods.get('fixture-method').instructions, 'Updated\nInstructions');
     const work = core.createWorkContext({ name: 'Workflow fixture' });
     fs.writeFileSync(path.join(core.capabilities.root(work.workspaceId).path, 'fixture.txt'), 'synthetic file');
-    choices = ['verify-files', work.id, 'add', 'done', 'yes']; prompts = ['fixture.txt']; await target.workflows();
+    choices = ['done', 'yes']; prompts = ['fixture.txt']; await target.workflows();
     choices = ['resident']; await target.memory();
   } finally { await app.stop(); await core.close(); await removeTemp(directory); }
 });

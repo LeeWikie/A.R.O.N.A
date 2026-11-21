@@ -32,7 +32,7 @@ test('real authenticated core delivers authorized chat over SSE', { timeout: 30_
     controller.enqueue({ type: 'text-delta', id: 'reply', delta: 'Visible partial' });
     void gate.then(() => { controller.enqueue({ type: 'text-delta', id: 'reply', delta: ' completed' }); controller.enqueue({ type: 'text-end', id: 'reply' }); controller.enqueue({ type: 'finish', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } }); controller.close(); });
   } }) }) });
-  const core = await Core.open({ dataDir: directory, model, memoryEnabled: false });
+  const core = await Core.open({ dataDir: directory, model, memoryEnabled: false, controlToken: 'Z-synthetic-control-token-0123456789' });
   const server = serve({ fetch: createApp(core).fetch, hostname: '127.0.0.1', port: 0 });
   if (!server.listening) await once(server, 'listening');
   const client = new Client(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, core.controlToken);

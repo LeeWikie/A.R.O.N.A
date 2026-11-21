@@ -8,7 +8,6 @@ function continueTest() {
   if (continuing) return; continuing = true;
   child.write('\x1b');
   setTimeout(() => child.write('\x15'), 100);
-  setTimeout(() => child.write('\x1b'), 250);
   setTimeout(() => { child.resize(60, 20); child.write('\x1b[200~hello中文粘贴\n第二行\x1b[201~'); }, 450);
   setTimeout(() => child.write('\r'), 650);
   setTimeout(() => { child.resize(100, 30); child.write('/menu\r'); }, 900);

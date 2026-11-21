@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { Memory } from '@mastra/memory';
+import { LibSQLStore } from '@mastra/libsql';
 import { MastraLanguageModelV2Mock } from '@mastra/core/test-utils/llm-mock';
 import type { LanguageModelV2CallOptions } from '@ai-sdk/provider';
 import { Core } from '../src/core.js';
@@ -39,11 +41,16 @@ const report = (summary = 'Actual synthetic work completed.') => ({ outcome: 'su
 test('full context passes every history page, survives restart and separates request from terminal snapshot', { timeout: 40_000 }, async () => {
   const dir = temp(); const prompts: string[] = [];
   const fixtureModel = model(request => { prompts.push(JSON.stringify(request.prompt)); return undefined; });
-  let core = await Core.open({ dataDir: dir, model: fixtureModel, memoryEnabled: false });
   const ids = Array.from({ length: 245 }, () => randomUUID());
+  const storage = new LibSQLStore({ id: 'arona-storage', url: 'file:' + path.join(dir, 'history.sqlite').replaceAll('\\', '/') });
+  await storage.init();
+  const memory = new Memory({ storage, options: { lastMessages: false, generateTitle: false, semanticRecall: false, workingMemory: { enabled: false } } });
   try {
-    await core.memory.createThread({ threadId: 'main', resourceId: 'local' });
-    await core.memory.saveMessages({ messages: ids.map((id, index) => ({ id, resourceId: 'local', threadId: 'main', role: 'user', createdAt: new Date(Date.UTC(2020, 0, 1, 0, 0, index)), content: { format: 2, parts: [{ type: 'text', text: `original-line-${index}-exact` }] } })) });
+    await memory.createThread({ threadId: 'main', resourceId: 'local' });
+    await memory.saveMessages({ messages: ids.map((id, index) => ({ id, resourceId: 'local', threadId: 'main', role: 'user', createdAt: new Date(Date.UTC(2020, 0, 1, 0, 0, index)), content: { format: 2, parts: [{ type: 'text', text: `original-line-${index}-exact` }] } })) });
+  } finally { await storage.close(); }
+  let core = await Core.open({ dataDir: dir, model: fixtureModel, memoryEnabled: false });
+  try {
     const first = await core.submitSignal({ version: 2, source: 'fixture', type: 'user-message', content: 'first appended input' });
     await finished(core, first.runId!);
     assert.ok(ids.every((_, index) => prompts[0]!.includes(`original-line-${index}-exact`)));
@@ -235,7 +242,30 @@ test('legacy databases are backed up before recovery mutates state',async()=>{
   const oldHistory=new DatabaseSync(path.join(dir,'history.sqlite'));oldHistory.exec("CREATE TABLE legacy_fixture(value TEXT); INSERT INTO legacy_fixture VALUES('original fixture')");oldHistory.close();
   const core=await Core.open({dataDir:dir,memoryEnabled:false});
   try{
-    const backups=fs.readdirSync(path.join(dir,'migration-backups'));assert.equal(backups.length,1);
+    const allBackups=fs.readdirSync(path.join(dir,'migration-backups'));
+    const graphBackups=allBackups.filter(name=>name.startsWith('session-graph-'));
+    const backups=allBackups.filter(name=>!name.startsWith('session-graph-'));
+    assert.equal(allBackups.length,2);assert.equal(graphBackups.length,1);assert.equal(backups.length,1);
+    const legacyDirectory=path.join(dir,'migration-backups',backups[0]!);
+    assert.deepEqual(fs.readdirSync(legacyDirectory).sort(),['history.sqlite','records.sqlite']);
+    const graphDirectory=path.join(dir,'migration-backups',graphBackups[0]!);
+    const manifest=JSON.parse(fs.readFileSync(path.join(graphDirectory,'manifest.json'),'utf8')) as {format:string;version:number;files:Array<{name:string;sha256:string;integrity:string}>};
+    assert.equal(manifest.format,'session-graph-migration-backup');assert.equal(manifest.version,1);
+    assert.deepEqual(manifest.files.map(file=>file.name).sort(),['history.sqlite','records.sqlite']);
+    for(const file of manifest.files){
+      const target=path.join(graphDirectory,file.name);
+      assert.equal(createHash('sha256').update(fs.readFileSync(target)).digest('hex'),file.sha256);
+      assert.equal(createHash('sha256').update(fs.readFileSync(path.join(legacyDirectory,file.name))).digest('hex'),file.sha256);
+      assert.equal(file.integrity,'ok');
+      const check=new DatabaseSync(target,{readOnly:true});
+      try{
+        assert.equal(check.prepare('PRAGMA integrity_check').get()?.integrity_check,'ok');
+        if(file.name==='records.sqlite'){
+          assert.equal(check.prepare('SELECT status FROM signals WHERE id=?').get(input.id)?.status,'received');
+          assert.equal(check.prepare('SELECT body FROM signals WHERE id=?').get(input.id)?.body,JSON.stringify(input));
+        }else assert.equal(check.prepare('SELECT value FROM legacy_fixture').get()?.value,'original fixture');
+      }finally{check.close();}
+    }
     const backup=new DatabaseSync(path.join(dir,'migration-backups',backups[0]!,'records.sqlite'),{readOnly:true});
     try{assert.equal(backup.prepare('SELECT status FROM signals WHERE id=?').get(input.id)?.status,'received');assert.equal(backup.prepare('SELECT body FROM signals WHERE id=?').get(input.id)?.body,JSON.stringify(input));}finally{backup.close();}
     const history=new DatabaseSync(path.join(dir,'migration-backups',backups[0]!,'history.sqlite'),{readOnly:true});

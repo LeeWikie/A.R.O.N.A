@@ -58,9 +58,11 @@ export class ReplyStream {
       if (!draft.started) continue;
       const base = { draftId, signalId: this.signalId, contextId: this.contextId, runId: this.runId };
       if (success) {
-        const output = this.store.publish({ kind: 'message', runId: this.runId, signalIds: [...this.sources], toolCallId: `reply:${draftId}`, content: draft.text });
+        this.store.transaction(() => {
+        const output = this.store.publish({ kind: 'message', runId: base.runId, signalIds: [...this.sources], toolCallId: `reply:${draftId}`, content: draft.text });
         this.runtime.event({ contextId: this.contextId, runId: this.runId, kind: 'delivery', data: output, key: `delivery:${output.id}` });
         this.runtime.event({ contextId: this.contextId, runId: this.runId, kind: 'reply.commit', data: { ...base, output }, key: `reply.commit:${this.runId}:${draftId}` });
+        });
       } else this.runtime.event({ contextId: this.contextId, runId: this.runId, kind: 'reply.cancel', data: base, key: `reply.cancel:${this.runId}:${draftId}` });
     }
     this.drafts.clear();

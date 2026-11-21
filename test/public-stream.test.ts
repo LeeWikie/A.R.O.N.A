@@ -6,7 +6,7 @@ import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {Core} from '../src/core.js';
 import {createApp} from '../src/http.js';
-import {scriptedModel,finished,removeTemp} from './helpers.js';
+import {scriptedModel,finished,removeTemp,until} from './helpers.js';
 
 function request(core:Core,route:string,signal?:AbortSignal){return createApp(core).request(route,{headers:{Authorization:`Bearer ${core.controlToken}`},signal});}
 
@@ -41,11 +41,15 @@ test('authenticated SSE replays, checkpoints filtered gaps and cleans up on disc
 });
 
 test('canonical reply deliveries identify only their own draft, including history replay',async()=>{
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'arona-reply-projection-'));const core=await Core.open({dataDir:dir,memoryEnabled:false});
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'arona-reply-projection-'));let release!:()=>void;
+ const gate=new Promise<void>(resolve=>{release=resolve;});const fixture=scriptedModel({gate});
+ const core=await Core.open({dataDir:dir,memoryEnabled:false,model:fixture.model});
  try{
   const {signalSchema}=await import('../src/domain.js');
   const input=signalSchema.parse({id:randomUUID(),contextId:'main',source:'tui-message',type:'user-message',content:'synthetic user input'});
-  const runId=randomUUID();core.store.receive(input);core.store.accept(input.id,randomUUID(),runId,'wake','main');
+  const receipt=await core.submitMessage({id:input.id,contextId:input.contextId,content:input.content});
+  const runId=receipt.runId!;await until(()=>fixture.calls(),count=>count>0);
+  assert.ok(core.runtime.setting(`session-run-anchor:${runId}`,null));
   const reply=core.store.publish({kind:'message',runId,signalIds:[input.id],toolCallId:'reply:fixture-draft',content:'canonical reply'});
   const other=core.store.publish({kind:'message',runId,signalIds:[input.id],toolCallId:'ordinary-tool',content:'separate delivery'});
   for(const output of [reply,other])core.runtime.event({contextId:'main',runId,kind:'delivery',data:{...output,replyDraftId:'untrusted-event-claim'}});
@@ -55,6 +59,6 @@ test('canonical reply deliveries identify only their own draft, including histor
   const history=await(await request(core,'/conversation')).json() as {messages:{id:string;replyDraftId?:string}[]};
   assert.equal(history.messages.find(e=>e.id===`output:${reply.id}`)?.replyDraftId,'fixture-draft');
   assert.equal(history.messages.find(e=>e.id===`output:${other.id}`)?.replyDraftId,undefined);
-  core.store.finishRun(runId,'succeeded');
- }finally{await core.close();await removeTemp(dir);}
+  release();assert.equal((await finished(core,runId))?.status,'succeeded');
+ }finally{release();await core.close();await removeTemp(dir);}
 });

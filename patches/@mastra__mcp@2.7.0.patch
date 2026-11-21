@@ -1,0 +1,1033 @@
+diff --git a/dist/client/actions/prompt.d.ts b/dist/client/actions/prompt.d.ts
+index c135c60633d00b21c30207958a62063ea6a942be..8d1a6f0b1f38b2de43d87df96363b3697b9899f8 100644
+--- a/dist/client/actions/prompt.d.ts
++++ b/dist/client/actions/prompt.d.ts
+@@ -1,5 +1,5 @@
+ import type { IMastraLogger } from '@mastra/core/logger';
+-import type { GetPromptResult, Prompt } from '@modelcontextprotocol/client';
++import type { GetPromptResult, Prompt, ListPromptsResult } from '@modelcontextprotocol/client';
+ import type { InternalMastraMCPClient } from '../client.js';
+ interface PromptClientActionsConfig {
+     client: InternalMastraMCPClient;
+@@ -12,6 +12,7 @@ interface PromptClientActionsConfig {
+  * Prompts are reusable message templates that can be parameterized and used for AI interactions.
+  */
+ export declare class PromptClientActions {
++    page(cursor?:string,options?:{signal?:AbortSignal}):Promise<ListPromptsResult>;
+     private readonly client;
+     private readonly logger;
+     /**
+@@ -34,7 +35,7 @@ export declare class PromptClientActions {
+      * });
+      * ```
+      */
+-    list(): Promise<Prompt[]>;
++    list(options?: {signal?: AbortSignal}): Promise<Prompt[]>;
+     /**
+      * Retrieves a specific prompt with its messages from the MCP server.
+      *
+@@ -64,7 +65,7 @@ export declare class PromptClientActions {
+     get({ name, args }: {
+         name: string;
+         args?: Record<string, any>;
+-    }): Promise<GetPromptResult>;
++    }, options?: {signal?: AbortSignal}): Promise<GetPromptResult>;
+     /**
+      * Sets a notification handler for when the list of available prompts changes.
+      *
+diff --git a/dist/client/actions/resource.d.ts b/dist/client/actions/resource.d.ts
+index cd1be8da391f514835497b42529282a76c857e2d..0105c6519f6b71ba8978ab2d242518c5a3ba917a 100644
+--- a/dist/client/actions/resource.d.ts
++++ b/dist/client/actions/resource.d.ts
+@@ -1,5 +1,5 @@
+ import type { IMastraLogger } from '@mastra/core/logger';
+-import type { Resource, ResourceTemplateType } from '@modelcontextprotocol/client';
++import type { Resource, ResourceTemplateType, ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult } from '@modelcontextprotocol/client';
+ import type { InternalMastraMCPClient } from '../client.js';
+ interface ResourceClientActionsConfig {
+     client: InternalMastraMCPClient;
+@@ -13,6 +13,9 @@ interface ResourceClientActionsConfig {
+  * records, API responses, etc.).
+  */
+ export declare class ResourceClientActions {
++    page(cursor?:string,options?:{signal?:AbortSignal}):Promise<ListResourcesResult>;
++    templatesPage(cursor?:string,options?:{signal?:AbortSignal}):Promise<ListResourceTemplatesResult>;
++    readWithMetadata(uri:string,options?:{signal?: AbortSignal;cacheMode?: 'use'|'refresh'|'bypass'}):Promise<{result:ReadResourceResult;cached:boolean}>;
+     private readonly client;
+     private readonly logger;
+     /**
+@@ -35,7 +38,7 @@ export declare class ResourceClientActions {
+      * });
+      * ```
+      */
+-    list(): Promise<Resource[]>;
++    list(options?: {signal?: AbortSignal}): Promise<Resource[]>;
+     /**
+      * Retrieves all available resource templates from the connected MCP server.
+      *
+@@ -53,7 +56,7 @@ export declare class ResourceClientActions {
+      * });
+      * ```
+      */
+-    templates(): Promise<ResourceTemplateType[]>;
++    templates(options?: {signal?: AbortSignal}): Promise<ResourceTemplateType[]>;
+     /**
+      * Reads the content of a specific resource from the MCP server.
+      *
+@@ -67,7 +70,7 @@ export declare class ResourceClientActions {
+      * console.log(result.contents[0].text); // Resource text content
+      * ```
+      */
+-    read(uri: string): Promise<{
++    read(uri: string, options?: {signal?: AbortSignal;cacheMode?: 'use'|'refresh'|'bypass'}): Promise<{
+         [x: string]: unknown;
+         _meta?: {
+             [x: string]: unknown;
+diff --git a/dist/client/client.d.ts b/dist/client/client.d.ts
+index b5e3b654203b695ef993c1e869c2967f1da90241..c17d3029214cd6cd10d98c071c4de19dfc9e83fb 100644
+--- a/dist/client/client.d.ts
++++ b/dist/client/client.d.ts
+@@ -218,6 +218,7 @@ export declare class InternalMastraMCPClient extends MastraBase {
+     private assertCurrentRevision;
+     get forwardInstructions(): boolean;
+     get instructionsMaxLength(): number;
++    notifyRootsChanged(): Promise<{notified: boolean}>;
+     disconnect(): Promise<void>;
+     /**
+      * Forces a reconnection to the MCP server by disconnecting and reconnecting.
+@@ -226,20 +227,24 @@ export declare class InternalMastraMCPClient extends MastraBase {
+      */
+     forceReconnect(): Promise<void>;
+     private reconnectAfterTransportFailure;
+-    listResources(): Promise<ListResourcesResult>;
+-    readResource(uri: string): Promise<ReadResourceResult>;
+-    listResourceTemplates(): Promise<ListResourceTemplatesResult>;
++    listResources(options?: {signal?: AbortSignal}): Promise<ListResourcesResult>;
++    listResourcesPage(cursor?:string,options?:{signal?:AbortSignal}):Promise<ListResourcesResult>;
++    readResource(uri: string, options?: {signal?: AbortSignal;cacheMode?: 'use'|'refresh'|'bypass'}): Promise<ReadResourceResult>;
++    readResourceWithMetadata(uri:string,options?:{signal?: AbortSignal;cacheMode?: 'use'|'refresh'|'bypass'}):Promise<{result:ReadResourceResult;cached:boolean}>;
++    listResourceTemplates(options?: {signal?: AbortSignal}): Promise<ListResourceTemplatesResult>;
++    listResourceTemplatesPage(cursor?:string,options?:{signal?:AbortSignal}):Promise<ListResourceTemplatesResult>;
+     /**
+      * Fetch the list of available prompts from the MCP server.
+      */
+-    listPrompts(): Promise<ListPromptsResult>;
++    listPrompts(options?: {signal?: AbortSignal}): Promise<ListPromptsResult>;
++    listPromptsPage(cursor?:string,options?:{signal?:AbortSignal}):Promise<ListPromptsResult>;
+     /**
+      * Get a prompt and its dynamic messages from the server.
+      */
+     getPrompt({ name, args }: {
+         name: string;
+         args?: Record<string, any>;
+-    }): Promise<GetPromptResult>;
++    }, options?: {signal?: AbortSignal}): Promise<GetPromptResult>;
+     private hasSubscriptionInterest;
+     private subscriptionFilter;
+     /** Serializes stream replacements so concurrent mutations apply in order. */
+diff --git a/dist/client/configuration.d.ts b/dist/client/configuration.d.ts
+index 0277820013cba8272e3fc1be659b9146bb92ea85..6b5ffdee55f0454b5b9f7e72fe8e90c33bd55bb1 100644
+--- a/dist/client/configuration.d.ts
++++ b/dist/client/configuration.d.ts
+@@ -2,7 +2,7 @@ import type { Stream } from 'node:stream';
+ import { MastraBase } from '@mastra/core/base';
+ import type { MCPServerBase } from '@mastra/core/mcp';
+ import type { Tool } from '@mastra/core/tools';
+-import type { ProgressNotification, Prompt, Resource, ResourceTemplateType } from '@modelcontextprotocol/client';
++import type { ProgressNotification, Prompt, Resource, ResourceTemplateType, ListResourcesResult, ListResourceTemplatesResult, ListPromptsResult, ReadResourceResult } from '@modelcontextprotocol/client';
+ import type { MCPDetailedTask, MCPTaskInputResponses } from '../shared/tasks/index.js';
+ import type { MastraMCPServerDefinition, MCPServerAuthState } from './client.js';
+ import type { MCPDiscoveryErrorDetails } from './error-utils.js';
+@@ -10,6 +10,8 @@ import type { MCPClientWebhookOptions, MCPEventDescriptor, MCPEventSubscribeOpti
+ import type { MCPClientInfo, MCPClientServers, MCPClientTools, MCPClientToolsets, MCPServerImplementation, MCPServerMap, SerializableMCPToolCatalog, SerializableMCPToolDefinition } from './types.js';
+ /** Options for aggregate discovery across configured MCP servers. */
+ export interface MCPDiscoveryOptions {
++    /** Abort only these discovery requests. */
++    signal?: AbortSignal;
+     /** Maximum time to wait for each server's discovery operation, in milliseconds. */
+     perServerTimeoutMs?: number;
+ }
+@@ -253,6 +255,9 @@ export declare class MCPClient<TServers extends MCPClientServers<TServers> = MCP
+      * ```
+      */
+     get resources(): {
++        page:(serverName:string,cursor?:string,options?:{signal?:AbortSignal})=>Promise<ListResourcesResult>;
++        templatesPage:(serverName:string,cursor?:string,options?:{signal?:AbortSignal})=>Promise<ListResourceTemplatesResult>;
++        readWithMetadata:(serverName:string,uri:string,options?:{signal?: AbortSignal;cacheMode?: 'use'|'refresh'|'bypass'})=>Promise<{result:ReadResourceResult;cached:boolean}>;
+         /**
+          * Lists all available resources from all configured servers.
+          *
+@@ -267,7 +272,7 @@ export declare class MCPClient<TServers extends MCPClientServers<TServers> = MCP
+          * console.log(resources.weatherServer); // Array of resources
+          * ```
+          */
+-        list: () => Promise<Record<string, Resource[]>>;
++        list: (options?: MCPDiscoveryOptions) => Promise<Record<string, Resource[]>>;
+         /**
+          * Lists resources while preserving per-server discovery failures.
+          * The existing `list()` method remains the success-only convenience API.
+@@ -292,7 +297,7 @@ export declare class MCPClient<TServers extends MCPClientServers<TServers> = MCP
+          * console.log(templates.weatherServer); // Array of resource templates
+          * ```
+          */
+-        templates: () => Promise<Record<string, ResourceTemplateType[]>>;
++        templates: (options?: MCPDiscoveryOptions) => Promise<Record<string, ResourceTemplateType[]>>;
+         /**
+          * Lists resource templates while preserving per-server discovery failures.
+          * The existing `templates()` method remains the success-only convenience API.
+@@ -317,7 +322,7 @@ export declare class MCPClient<TServers extends MCPClientServers<TServers> = MCP
+          * console.log(content.contents[0].text);
+          * ```
+          */
+-        read: (serverName: string, uri: string) => Promise<{
++        read: (serverName: string, uri: string, options?: {signal?: AbortSignal}) => Promise<{
+             [x: string]: unknown;
+             _meta?: {
+                 [x: string]: unknown;
+@@ -435,6 +440,7 @@ export declare class MCPClient<TServers extends MCPClientServers<TServers> = MCP
+      * ```
+      */
+     get prompts(): {
++        page:(serverName:string,cursor?:string,options?:{signal?:AbortSignal})=>Promise<ListPromptsResult>;
+         /**
+          * Lists all available prompts from all configured servers.
+          *
+@@ -449,7 +455,7 @@ export declare class MCPClient<TServers extends MCPClientServers<TServers> = MCP
+          * console.log(prompts.weatherServer); // Array of prompts
+          * ```
+          */
+-        list: () => Promise<Record<string, Prompt[]>>;
++        list: (options?: MCPDiscoveryOptions) => Promise<Record<string, Prompt[]>>;
+         /**
+          * Lists prompts while preserving per-server discovery failures.
+          * The existing `list()` method remains the success-only convenience API.
+@@ -484,7 +490,7 @@ export declare class MCPClient<TServers extends MCPClientServers<TServers> = MCP
+             serverName: string;
+             name: string;
+             args?: Record<string, any>;
+-        }) => Promise<{
++        }, options?: {signal?: AbortSignal}) => Promise<{
+             [x: string]: unknown;
+             _meta?: {
+                 [x: string]: unknown;
+@@ -657,6 +663,7 @@ export declare class MCPClient<TServers extends MCPClientServers<TServers> = MCP
+      * });
+      * ```
+      */
++    notifyRootsChanged(serverName: string): Promise<{notified: boolean}>;
+     disconnect(): Promise<void>;
+     /**
+      * Reconnects a single MCP server by name.
+diff --git a/dist/client/types.d.ts b/dist/client/types.d.ts
+index 23fa20f8831ec468935b67930012141b0fe31f2d..3c723fbdb43412c37d64d17fa5b0d4a09636dd39 100644
+--- a/dist/client/types.d.ts
++++ b/dist/client/types.d.ts
+@@ -1,7 +1,7 @@
+ import type { IOType } from 'node:child_process';
+ import type { RequestContext } from '@mastra/core/di';
+-import type { Tool } from '@mastra/core/tools';
+-import type { CallToolResult, StreamableHTTPClientTransportOptions, ClientCapabilities, ElicitRequestParams, ElicitResult, LoggingLevel, ProgressNotification, ToolAnnotations, jsonSchemaValidator } from '@modelcontextprotocol/client';
++import type { Tool, ToolExecutionContext } from '@mastra/core/tools';
++import type { CallToolResult, StreamableHTTPClientTransportOptions, ClientCapabilities, ElicitRequestParams, ElicitResult, LoggingLevel, ProgressNotification, Root, ToolAnnotations, jsonSchemaValidator } from '@modelcontextprotocol/client';
+ import type { MCPTraceContext } from '../shared/trace-context.js';
+ import type { EventsWebhookSetup } from './events/types.js';
+ /** Published tool input and structured-output snapshot for each configured server. */
+@@ -199,6 +199,8 @@ export type MCPClientInfo = {
+  * Base options common to all MCP server definitions.
+  */
+ export type BaseServerOptions = {
++    /** Project roots supplied by the trusted host; no filesystem access is implied. */
++    roots?: (context: {signal: AbortSignal}) => Root[] | Promise<Root[]>;
+     /** Overrides the `clientInfo` sent to this server, merged field-wise over `MCPClientOptions.clientInfo`. */
+     clientInfo?: MCPClientInfo;
+     /** Optional handler for server log messages */
+@@ -231,6 +233,8 @@ export type BaseServerOptions = {
+     serverLogLevel?: LoggingLevel;
+     /** Whether to enable progress tracking (default: false) */
+     enableProgressTracking?: boolean;
++    /** Observes progress for the original tool invocation; does not change its result or authority. */
++    onToolProgress?: (progress: Omit<ProgressNotification['params'], 'progressToken'>, context: ToolExecutionContext | undefined) => void;
+     /**
+      * Returns the W3C `traceparent`, `tracestate` and `baggage` values to attach
+      * to each outgoing MCP request's `_meta`.
+@@ -306,6 +310,12 @@ export type BaseServerOptions = {
+      * @default 'throw'
+      */
+     onToolError?: 'throw' | 'return';
++    /** Reconnect without replaying dispatched tool calls when set to never. Defaults to always. */
++    toolCallRetry?: 'always' | 'never';
++    /** Retain the complete CallToolResult as {result, validationError?}; original remote output validation is preserved. */
++    preserveResultEnvelope?: boolean;
++    /** Preserve catalog business extensions after the original native protocol and result validation. */
++    preserveCatalogFields?: boolean;
+     /**
+      * Optional custom JSON Schema validator forwarded to the underlying MCP
+      * client. Use this to opt into a non-default validator implementation.
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 77aa9af710ae44a1827842be0636318d3fa21b84..dc9554314e1727ee068029d991b6f8b925f6056f 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -14163,9 +14163,10 @@ var PromptClientActions = class {
+ 	* });
+ 	* ```
+ 	*/
+-	async list() {
++	async page(cursor, options) { return this.client.listPromptsPage(cursor, options); }
++	async list(options) {
+ 		try {
+-			const response = await this.client.listPrompts();
++			const response = await this.client.listPrompts(options);
+ 			if (response && response.prompts && Array.isArray(response.prompts)) return response.prompts.map((prompt) => ({ ...prompt }));
+ 			this.logger.warn("Prompts response did not have expected structure", {
+ 				server: this.client.name,
+@@ -14207,11 +14208,11 @@ var PromptClientActions = class {
+ 	* console.log(prompt.messages);
+ 	* ```
+ 	*/
+-	async get({ name, args }) {
++	async get({ name, args }, options) {
+ 		return this.client.getPrompt({
+ 			name,
+ 			args
+-		});
++		}, options);
+ 	}
+ 	/**
+ 	* Sets a notification handler for when the list of available prompts changes.
+@@ -14267,9 +14268,12 @@ var ResourceClientActions = class {
+ 	* });
+ 	* ```
+ 	*/
+-	async list() {
++	async page(cursor, options) { return this.client.listResourcesPage(cursor, options); }
++	async templatesPage(cursor, options) { return this.client.listResourceTemplatesPage(cursor, options); }
++	async readWithMetadata(uri, options) { return this.client.readResourceWithMetadata(uri, options); }
++	async list(options) {
+ 		try {
+-			const response = await this.client.listResources();
++			const response = await this.client.listResources(options);
+ 			if (response && response.resources && Array.isArray(response.resources)) return response.resources;
+ 			this.logger.warn("Resources response did not have expected structure", {
+ 				server: this.client.name,
+@@ -14302,9 +14306,9 @@ var ResourceClientActions = class {
+ 	* });
+ 	* ```
+ 	*/
+-	async templates() {
++	async templates(options) {
+ 		try {
+-			const response = await this.client.listResourceTemplates();
++			const response = await this.client.listResourceTemplates(options);
+ 			if (response && response.resourceTemplates && Array.isArray(response.resourceTemplates)) return response.resourceTemplates;
+ 			this.logger.warn("Resource templates response did not have expected structure", {
+ 				server: this.client.name,
+@@ -14333,8 +14337,8 @@ var ResourceClientActions = class {
+ 	* console.log(result.contents[0].text); // Resource text content
+ 	* ```
+ 	*/
+-	async read(uri) {
+-		return this.client.readResource(uri);
++	async read(uri, options) {
++		return this.client.readResource(uri, options);
+ 	}
+ 	/**
+ 	* Subscribes to update notifications for a resource. The client carries every
+@@ -14407,7 +14411,7 @@ var ResourceClientActions = class {
+ * protocol errors are never reconnectable.
+ */
+ function isReconnectableMCPError(error) {
+-	if (!(error instanceof Error)) return false;
++	if (!(error instanceof Error) || error instanceof _modelcontextprotocol_client.ProtocolError || error.code === "MCP_RESULT_OBSERVER_FAILED") return false;
+ 	const errorMessage = error.message.toLowerCase();
+ 	return errorMessage.includes("not connected") || errorMessage.includes("http 400") || errorMessage.includes("http 401") || errorMessage.includes("http 403") || errorMessage.includes("http 404") || errorMessage.includes("econnrefused") || errorMessage.includes("fetch failed") || errorMessage.includes("connection refused") || errorMessage.includes("connection closed") || errorMessage.includes("typeerror: terminated");
+ }
+@@ -16012,6 +16016,7 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 		const configured = server.capabilities ?? {};
+ 		if (configured.elicitation !== void 0 && !server.inputRequests) throw new Error(`MCP server '${name}' advertises the elicitation capability without an inputRequests handler. Configure inputRequests or remove capabilities.elicitation.`);
+ 		const clientCapabilities = {
++			...server.roots ? { roots: { listChanged: true } } : {},
+ 			...server.inputRequests ? { elicitation: configured.elicitation ?? { form: {} } } : {},
+ 			extensions: {
+ 				...configured.extensions ?? {},
+@@ -16025,12 +16030,14 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 		}, {
+ 			capabilities: clientCapabilities,
+ 			...server.jsonSchemaValidator ? { jsonSchemaValidator: server.jsonSchemaValidator } : {},
++			preserveCatalogFields: server.preserveCatalogFields,
+ 			versionNegotiation: { mode: negotiationMode(server.protocolVersion) }
+ 		});
+ 		this.taskRequester = new TaskRequester(this.client, {
+ 			timeout: this.timeout,
+ 			meta: () => this.requestMeta()
+ 		});
++		if (server.roots) this.client.setRequestHandler("roots/list", async (_request, context) => ({ roots: await server.roots({ signal: context.mcpReq.signal }) }));
+ 		if (server.inputRequests) {
+ 			const handler = server.inputRequests;
+ 			this.client.setRequestHandler("elicitation/create", async (request, ctx) => {
+@@ -16284,6 +16291,8 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 	};
+ 	subscriptionStream;
+ 	subscriptionUpdate = Promise.resolve();
++	legacyResourceTransport;
++	legacyResourceSubscriptions = new Set();
+ 	lifecycleGeneration = 0;
+ 	eventStreamRouter;
+ 	onEventStreamSent;
+@@ -16515,38 +16524,43 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 			return;
+ 		}
+ 	}
+-	async listResources() {
++	async notifyRootsChanged() { if (this.negotiatedProtocolVersion === "2026-07-28") return { notified: false }; await this.client.sendRootsListChanged(); return { notified: true }; }
++	async listResourcesPage(cursor, options) { return this.client.listResources({ _meta: this.requestMeta(), ...(cursor === void 0 ? {} : { cursor }) }, { timeout: this.timeout, signal: options?.signal, pagination: "page" }); }
++	async listResources(options) {
+ 		this.log("debug", `Requesting resources from MCP server`);
+-		return await this.client.listResources({ _meta: this.requestMeta() }, { timeout: this.timeout });
++		return await this.client.listResources({ _meta: this.requestMeta() }, { timeout: this.timeout, signal: options?.signal });
+ 	}
+-	async readResource(uri) {
++	async readResourceWithMetadata(uri, options) { return this.client.readResourceWithMetadata({ uri, _meta: this.requestMeta() }, { timeout: this.timeout, signal: options?.signal, cacheMode: options?.cacheMode }); }
++	async readResource(uri, options) {
+ 		this.log("debug", `Reading resource from MCP server: ${uri}`);
+ 		return await this.client.readResource({
+ 			uri,
+ 			_meta: this.requestMeta()
+-		}, { timeout: this.timeout });
++		}, { timeout: this.timeout, signal: options?.signal, cacheMode: options?.cacheMode });
+ 	}
+-	async listResourceTemplates() {
++	async listResourceTemplatesPage(cursor, options) { return this.client.listResourceTemplates({ _meta: this.requestMeta(), ...(cursor === void 0 ? {} : { cursor }) }, { timeout: this.timeout, signal: options?.signal, pagination: "page" }); }
++	async listResourceTemplates(options) {
+ 		this.log("debug", `Requesting resource templates from MCP server`);
+-		return await this.client.listResourceTemplates({ _meta: this.requestMeta() }, { timeout: this.timeout });
++		return await this.client.listResourceTemplates({ _meta: this.requestMeta() }, { timeout: this.timeout, signal: options?.signal });
+ 	}
+ 	/**
+ 	* Fetch the list of available prompts from the MCP server.
+ 	*/
+-	async listPrompts() {
++	async listPromptsPage(cursor, options) { return this.client.listPrompts({ _meta: this.requestMeta(), ...(cursor === void 0 ? {} : { cursor }) }, { timeout: this.timeout, signal: options?.signal, pagination: "page" }); }
++	async listPrompts(options) {
+ 		this.log("debug", `Requesting prompts from MCP server`);
+-		return await this.client.listPrompts({ _meta: this.requestMeta() }, { timeout: this.timeout });
++		return await this.client.listPrompts({ _meta: this.requestMeta() }, { timeout: this.timeout, signal: options?.signal });
+ 	}
+ 	/**
+ 	* Get a prompt and its dynamic messages from the server.
+ 	*/
+-	async getPrompt({ name, args }) {
++	async getPrompt({ name, args }, options) {
+ 		this.log("debug", `Requesting prompt from MCP server: ${name}`);
+ 		return await this.client.getPrompt({
+ 			name,
+ 			arguments: args,
+ 			_meta: this.requestMeta()
+-		}, { timeout: this.timeout });
++		}, { timeout: this.timeout, signal: options?.signal });
+ 	}
+ 	hasSubscriptionInterest() {
+ 		const interest = this.subscriptionInterest;
+@@ -16576,7 +16590,11 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 	*/
+ 	async replaceSubscriptionStream() {
+ 		const negotiated = this.negotiatedProtocolVersion;
+-		if (negotiated !== void 0 && negotiated !== "2026-07-28" && this.subscriptionInterest.resourceSubscriptions.size === 0) {
++		if (negotiated !== void 0 && negotiated !== "2026-07-28") {
++			if (this.legacyResourceTransport !== this.transport) { this.legacyResourceTransport = this.transport; this.legacyResourceSubscriptions = new Set(); }
++			const desired = this.subscriptionInterest.resourceSubscriptions;
++			for (const uri of this.legacyResourceSubscriptions) if (!desired.has(uri)) { await this.client.unsubscribeResource({ uri }, { timeout: this.timeout }); this.legacyResourceSubscriptions.delete(uri); }
++			for (const uri of desired) if (!this.legacyResourceSubscriptions.has(uri)) { await this.client.subscribeResource({ uri }, { timeout: this.timeout }); this.legacyResourceSubscriptions.add(uri); }
+ 			const previous = this.subscriptionStream;
+ 			this.subscriptionStream = void 0;
+ 			await previous?.close();
+@@ -16661,7 +16679,7 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 	}
+ 	setResourceUpdatedNotificationHandler(handler) {
+ 		this.client.setNotificationHandler("notifications/resources/updated", (notification) => {
+-			handler(notification.params);
++			if (this.subscriptionInterest.resourceSubscriptions.has(notification.params.uri)) handler(notification.params);
+ 		});
+ 	}
+ 	async setResourceListChangedNotificationHandler(handler) {
+@@ -16967,7 +16985,7 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 				title,
+ 				description: tool.description || "",
+ 				inputSchema: this.convertInputSchema(tool.inputSchema),
+-				outputSchema: this.convertOutputSchema(tool.outputSchema),
++				outputSchema: this.serverConfig.preserveResultEnvelope ? zod.z.unknown() : this.convertOutputSchema(tool.outputSchema),
+ 				strict: getMastraToolStrictMeta(toolMeta),
+ 				...mcpToolProps,
+ 				requireApproval,
+@@ -16979,7 +16997,7 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 					forwardInstructions: this.forwardInstructions,
+ 					instructionsMaxLength: this.instructionsMaxLength
+ 				},
+-				...tool.outputSchema ? { toModelOutput: createStructuredToolToModelOutput() } : {},
++				...this.serverConfig.preserveResultEnvelope ? { toModelOutput: (output) => ({ type: "json", value: output }) } : tool.outputSchema ? { toModelOutput: createStructuredToolToModelOutput() } : {},
+ 				execute: async (input, context) => {
+ 					if (serverMeta.connectFirst) await this.connect();
+ 					const operationContext = context?.requestContext ?? null;
+@@ -16994,23 +17012,30 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 								...context?._meta,
+ 								...progressMeta
+ 							}, context?.tracingContext?.currentSpan);
+-							const { result: res, serverSpan } = takeServerTraceContext(await this.client.callTool({
++							let observedResult, nativeResult;
++							try { nativeResult = await this.client.callTool({
+ 								name: tool.name,
+ 								arguments: input,
+ 								..._meta ? { _meta } : {}
+ 							}, {
+ 								timeout: this.timeout,
+-								signal: context?.abortSignal
+-							}));
++								signal: context?.abortSignal,
++								...this.serverConfig.preserveResultEnvelope ? { onResult: (result) => { observedResult = result; } } : {},
++								...this.serverConfig.onToolProgress ? { onprogress: (progress) => { try { this.serverConfig.onToolProgress({ progress: progress.progress, ...progress.total !== void 0 ? { total: progress.total } : {}, ...progress.message !== void 0 ? { message: progress.message } : {} }, context); } catch (error) { try { this.log("warn", "MCP progress observer failed", { error: error instanceof Error ? error.message : String(error) }); } catch {} } } } : {}
++							}); } catch (error) {
++								if (this.serverConfig.preserveResultEnvelope && observedResult !== void 0 && error instanceof _modelcontextprotocol_client.ProtocolError) return { version: 1, result: observedResult, packetReceived: true, validated: false, validationError: { error: true, message: error.message, code: error.code } };
++								throw error;
++							}
++							const { result: res, serverSpan } = takeServerTraceContext(nativeResult);
+ 							const toolCallSpan = context?.tracingContext?.currentSpan;
+ 							if (toolCallSpan && serverSpan) toolCallSpan.links = [...toolCallSpan.links ?? [], serverSpan];
+ 							const task = this.taskOptions ? takeTaskHandle(res) : void 0;
+-							if (!task) return finishToolCall(res);
++							if (!task) return finishToolCall(res, observedResult ?? nativeResult);
+ 							this.log("debug", `Tool ${tool.name} continues as MCP task ${task.taskId}`);
+ 							toolCallSpan?.update({ metadata: { mcpTaskKey: taskKeyOf(task.taskId) } });
+ 							return finishToolCall(await this.awaitToolTask(tool.name, task, context?.abortSignal, context?.writer));
+ 						};
+-						const finishToolCall = async (res) => {
++						const finishToolCall = async (res, originalResult = res) => {
+ 							if (res.isError && this.onToolError === "throw") {
+ 								const errorText = extractToolErrorText(res.content);
+ 								this.log("debug", `Tool reported an error: ${tool.name}`, { error: errorText });
+@@ -17033,12 +17058,12 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 									const validation = (0, _mastra_core_tools.validateToolOutput)(validationSchema, res.structuredContent, tool.name);
+ 									if (validation.error) {
+ 										this.log("debug", `Tool output failed schema validation: ${tool.name}`, { message: validation.error.message });
+-										return validation.error;
++										return this.serverConfig.preserveResultEnvelope ? { version: 1, result: originalResult, packetReceived: true, validated: false, validationError: validation.error } : validation.error;
+ 									}
+ 								}
+-								return attachMcpCallToolContent(res.structuredContent, res.content, res._meta ? this.stampServerIdInMeta(res._meta) : void 0);
++								return this.serverConfig.preserveResultEnvelope ? { version: 1, result: originalResult, packetReceived: true, validated: true } : attachMcpCallToolContent(res.structuredContent, res.content, res._meta ? this.stampServerIdInMeta(res._meta) : void 0);
+ 							}
+-							return res;
++							return this.serverConfig.preserveResultEnvelope ? { version: 1, result: originalResult, packetReceived: true, validated: true } : res;
+ 						};
+ 						const failedTransport = this.transport;
+ 						const lifecycleGeneration = this.lifecycleGeneration;
+@@ -17047,6 +17072,20 @@ var InternalMastraMCPClient = class extends _mastra_core_base.MastraBase {
+ 						} catch (e) {
+ 							if (!(e instanceof _mastra_core_error.MastraError && (e.id === "MCP_CLIENT_TOOL_EXECUTION_FAILED" || e.id.startsWith("MCP_CLIENT_TOOL_TASK_"))) && isReconnectableMCPError(e)) {
+ 								this.log("debug", `Transport error detected for tool ${tool.name}, attempting reconnection...`, { error: e instanceof Error ? e.message : String(e) });
++                                if (this.serverConfig.toolCallRetry === "never") {
++                                    const uncertain = (cause) => new _mastra_core_error.MastraError({
++                                        id: "MCP_CLIENT_TOOL_OUTCOME_UNCERTAIN",
++                                        domain: _mastra_core_error.ErrorDomain.MCP,
++                                        category: _mastra_core_error.ErrorCategory.THIRD_PARTY,
++                                        text: "MCP call outcome is uncertain: the request may already have been dispatched. It was not replayed; verify its effect before invoking it again.",
++                                        details: { toolName: tool.name, serverName: this.name, outcomeUncertain: true }
++                                    }, cause);
++                                    if (context?.abortSignal?.aborted) throw e;
++                                    try { await this.reconnectAfterTransportFailure(failedTransport, lifecycleGeneration); }
++                                    catch (recoveryError) { throw uncertain(recoveryError); }
++                                    throw uncertain(e);
++                                }
++
+ 								try {
+ 									await this.reconnectAfterTransportFailure(failedTransport, lifecycleGeneration);
+ 									this.log("debug", `Retrying tool ${tool.name} after reconnection...`);
+@@ -18251,6 +18290,9 @@ To fix this you have three different options:
+ 	get resources() {
+ 		this.addToInstanceCache();
+ 		return {
++			page: async (serverName, cursor, options) => (await this.getConnectedClientForServer(serverName)).resources.page(cursor, options),
++			templatesPage: async (serverName, cursor, options) => (await this.getConnectedClientForServer(serverName)).resources.templatesPage(cursor, options),
++			readWithMetadata: async (serverName, uri, options) => (await this.getConnectedClientForServer(serverName)).resources.readWithMetadata(uri, options),
+ 			/**
+ 			* Lists all available resources from all configured servers.
+ 			*
+@@ -18265,7 +18307,7 @@ To fix this you have three different options:
+ 			* console.log(resources.weatherServer); // Array of resources
+ 			* ```
+ 			*/
+-			list: async () => (await this.listResourcesWithErrors()).resources,
++			list: async (options) => (await this.listResourcesWithErrors(options)).resources,
+ 			/**
+ 			* Lists resources while preserving per-server discovery failures.
+ 			* The existing `list()` method remains the success-only convenience API.
+@@ -18285,7 +18327,7 @@ To fix this you have three different options:
+ 			* console.log(templates.weatherServer); // Array of resource templates
+ 			* ```
+ 			*/
+-			templates: async () => (await this.listResourceTemplatesWithErrors()).templates,
++			templates: async (options) => (await this.listResourceTemplatesWithErrors(options)).templates,
+ 			/**
+ 			* Lists resource templates while preserving per-server discovery failures.
+ 			* The existing `templates()` method remains the success-only convenience API.
+@@ -18305,9 +18347,9 @@ To fix this you have three different options:
+ 			* console.log(content.contents[0].text);
+ 			* ```
+ 			*/
+-			read: async (serverName, uri) => {
++			read: async (serverName, uri, options) => {
+ 				try {
+-					return (await this.getConnectedClientForServer(serverName)).resources.read(uri);
++					return (await this.getConnectedClientForServer(serverName)).resources.read(uri, options);
+ 				} catch (error) {
+ 					throw new _mastra_core_error.MastraError({
+ 						id: "MCP_CLIENT_READ_RESOURCE_FAILED",
+@@ -18455,6 +18497,7 @@ To fix this you have three different options:
+ 	get prompts() {
+ 		this.addToInstanceCache();
+ 		return {
++			page: async (serverName, cursor, options) => (await this.getConnectedClientForServer(serverName)).prompts.page(cursor, options),
+ 			/**
+ 			* Lists all available prompts from all configured servers.
+ 			*
+@@ -18469,7 +18512,7 @@ To fix this you have three different options:
+ 			* console.log(prompts.weatherServer); // Array of prompts
+ 			* ```
+ 			*/
+-			list: async () => (await this.listPromptsWithErrors()).prompts,
++			list: async (options) => (await this.listPromptsWithErrors(options)).prompts,
+ 			/**
+ 			* Lists prompts while preserving per-server discovery failures.
+ 			* The existing `list()` method remains the success-only convenience API.
+@@ -18495,12 +18538,12 @@ To fix this you have three different options:
+ 			* console.log(prompt.messages);
+ 			* ```
+ 			*/
+-			get: async ({ serverName, name, args }) => {
++			get: async ({ serverName, name, args }, options) => {
+ 				try {
+ 					return (await this.getConnectedClientForServer(serverName)).prompts.get({
+ 						name,
+ 						args
+-					});
++					}, options);
+ 				} catch (error) {
+ 					throw new _mastra_core_error.MastraError({
+ 						id: "MCP_CLIENT_GET_PROMPT_FAILED",
+@@ -18614,6 +18657,7 @@ onListChanged: async (serverName, handler) => {
+ 	* });
+ 	* ```
+ 	*/
++	async notifyRootsChanged(serverName) { return (await this.getConnectedClientForServer(serverName)).notifyRootsChanged(); }
+ 	async disconnect() {
+ 		if (this.disconnectPromise) return this.disconnectPromise;
+ 		this.disconnectPromise = (async () => {
+@@ -19042,7 +19086,7 @@ onListChanged: async (serverName, handler) => {
+ 		return tools;
+ 	}
+ 	async listResourcesWithErrors(options) {
+-		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).resources.list(), {
++		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).resources.list(options), {
+ 			errorId: "MCP_CLIENT_LIST_RESOURCES_FAILED",
+ 			logMessage: "Failed to list resources from server:"
+ 		}, options);
+@@ -19052,7 +19096,7 @@ onListChanged: async (serverName, handler) => {
+ 		};
+ 	}
+ 	async listResourceTemplatesWithErrors(options) {
+-		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).resources.templates(), {
++		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).resources.templates(options), {
+ 			errorId: "MCP_CLIENT_LIST_RESOURCE_TEMPLATES_FAILED",
+ 			logMessage: "Failed to list resource templates from server:"
+ 		}, options);
+@@ -19062,7 +19106,7 @@ onListChanged: async (serverName, handler) => {
+ 		};
+ 	}
+ 	async listPromptsWithErrors(options) {
+-		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).prompts.list(), {
++		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).prompts.list(options), {
+ 			errorId: "MCP_CLIENT_LIST_PROMPTS_FAILED",
+ 			logMessage: "Failed to list prompts from server:"
+ 		}, options);
+diff --git a/dist/index.js b/dist/index.js
+index 7869ae425a6ca03bbd0206c1c3840aae20af18f9..ceaf2097906b22a23e742d85dc81a5a66bdde00c 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -14137,9 +14137,10 @@ var PromptClientActions = class {
+ 	* });
+ 	* ```
+ 	*/
+-	async list() {
++	async page(cursor, options) { return this.client.listPromptsPage(cursor, options); }
++	async list(options) {
+ 		try {
+-			const response = await this.client.listPrompts();
++			const response = await this.client.listPrompts(options);
+ 			if (response && response.prompts && Array.isArray(response.prompts)) return response.prompts.map((prompt) => ({ ...prompt }));
+ 			this.logger.warn("Prompts response did not have expected structure", {
+ 				server: this.client.name,
+@@ -14181,11 +14182,11 @@ var PromptClientActions = class {
+ 	* console.log(prompt.messages);
+ 	* ```
+ 	*/
+-	async get({ name, args }) {
++	async get({ name, args }, options) {
+ 		return this.client.getPrompt({
+ 			name,
+ 			args
+-		});
++		}, options);
+ 	}
+ 	/**
+ 	* Sets a notification handler for when the list of available prompts changes.
+@@ -14241,9 +14242,12 @@ var ResourceClientActions = class {
+ 	* });
+ 	* ```
+ 	*/
+-	async list() {
++	async page(cursor, options) { return this.client.listResourcesPage(cursor, options); }
++	async templatesPage(cursor, options) { return this.client.listResourceTemplatesPage(cursor, options); }
++	async readWithMetadata(uri, options) { return this.client.readResourceWithMetadata(uri, options); }
++	async list(options) {
+ 		try {
+-			const response = await this.client.listResources();
++			const response = await this.client.listResources(options);
+ 			if (response && response.resources && Array.isArray(response.resources)) return response.resources;
+ 			this.logger.warn("Resources response did not have expected structure", {
+ 				server: this.client.name,
+@@ -14276,9 +14280,9 @@ var ResourceClientActions = class {
+ 	* });
+ 	* ```
+ 	*/
+-	async templates() {
++	async templates(options) {
+ 		try {
+-			const response = await this.client.listResourceTemplates();
++			const response = await this.client.listResourceTemplates(options);
+ 			if (response && response.resourceTemplates && Array.isArray(response.resourceTemplates)) return response.resourceTemplates;
+ 			this.logger.warn("Resource templates response did not have expected structure", {
+ 				server: this.client.name,
+@@ -14307,8 +14311,8 @@ var ResourceClientActions = class {
+ 	* console.log(result.contents[0].text); // Resource text content
+ 	* ```
+ 	*/
+-	async read(uri) {
+-		return this.client.readResource(uri);
++	async read(uri, options) {
++		return this.client.readResource(uri, options);
+ 	}
+ 	/**
+ 	* Subscribes to update notifications for a resource. The client carries every
+@@ -14381,7 +14385,7 @@ var ResourceClientActions = class {
+ * protocol errors are never reconnectable.
+ */
+ function isReconnectableMCPError(error) {
+-	if (!(error instanceof Error)) return false;
++	if (!(error instanceof Error) || error instanceof ProtocolError || error.code === "MCP_RESULT_OBSERVER_FAILED") return false;
+ 	const errorMessage = error.message.toLowerCase();
+ 	return errorMessage.includes("not connected") || errorMessage.includes("http 400") || errorMessage.includes("http 401") || errorMessage.includes("http 403") || errorMessage.includes("http 404") || errorMessage.includes("econnrefused") || errorMessage.includes("fetch failed") || errorMessage.includes("connection refused") || errorMessage.includes("connection closed") || errorMessage.includes("typeerror: terminated");
+ }
+@@ -15986,6 +15990,7 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 		const configured = server.capabilities ?? {};
+ 		if (configured.elicitation !== void 0 && !server.inputRequests) throw new Error(`MCP server '${name}' advertises the elicitation capability without an inputRequests handler. Configure inputRequests or remove capabilities.elicitation.`);
+ 		const clientCapabilities = {
++			...server.roots ? { roots: { listChanged: true } } : {},
+ 			...server.inputRequests ? { elicitation: configured.elicitation ?? { form: {} } } : {},
+ 			extensions: {
+ 				...configured.extensions ?? {},
+@@ -15999,12 +16004,14 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 		}, {
+ 			capabilities: clientCapabilities,
+ 			...server.jsonSchemaValidator ? { jsonSchemaValidator: server.jsonSchemaValidator } : {},
++			preserveCatalogFields: server.preserveCatalogFields,
+ 			versionNegotiation: { mode: negotiationMode(server.protocolVersion) }
+ 		});
+ 		this.taskRequester = new TaskRequester(this.client, {
+ 			timeout: this.timeout,
+ 			meta: () => this.requestMeta()
+ 		});
++		if (server.roots) this.client.setRequestHandler("roots/list", async (_request, context) => ({ roots: await server.roots({ signal: context.mcpReq.signal }) }));
+ 		if (server.inputRequests) {
+ 			const handler = server.inputRequests;
+ 			this.client.setRequestHandler("elicitation/create", async (request, ctx) => {
+@@ -16258,6 +16265,8 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 	};
+ 	subscriptionStream;
+ 	subscriptionUpdate = Promise.resolve();
++	legacyResourceTransport;
++	legacyResourceSubscriptions = new Set();
+ 	lifecycleGeneration = 0;
+ 	eventStreamRouter;
+ 	onEventStreamSent;
+@@ -16489,38 +16498,43 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 			return;
+ 		}
+ 	}
+-	async listResources() {
++	async notifyRootsChanged() { if (this.negotiatedProtocolVersion === "2026-07-28") return { notified: false }; await this.client.sendRootsListChanged(); return { notified: true }; }
++	async listResourcesPage(cursor, options) { return this.client.listResources({ _meta: this.requestMeta(), ...(cursor === void 0 ? {} : { cursor }) }, { timeout: this.timeout, signal: options?.signal, pagination: "page" }); }
++	async listResources(options) {
+ 		this.log("debug", `Requesting resources from MCP server`);
+-		return await this.client.listResources({ _meta: this.requestMeta() }, { timeout: this.timeout });
++		return await this.client.listResources({ _meta: this.requestMeta() }, { timeout: this.timeout, signal: options?.signal });
+ 	}
+-	async readResource(uri) {
++	async readResourceWithMetadata(uri, options) { return this.client.readResourceWithMetadata({ uri, _meta: this.requestMeta() }, { timeout: this.timeout, signal: options?.signal, cacheMode: options?.cacheMode }); }
++	async readResource(uri, options) {
+ 		this.log("debug", `Reading resource from MCP server: ${uri}`);
+ 		return await this.client.readResource({
+ 			uri,
+ 			_meta: this.requestMeta()
+-		}, { timeout: this.timeout });
++		}, { timeout: this.timeout, signal: options?.signal, cacheMode: options?.cacheMode });
+ 	}
+-	async listResourceTemplates() {
++	async listResourceTemplatesPage(cursor, options) { return this.client.listResourceTemplates({ _meta: this.requestMeta(), ...(cursor === void 0 ? {} : { cursor }) }, { timeout: this.timeout, signal: options?.signal, pagination: "page" }); }
++	async listResourceTemplates(options) {
+ 		this.log("debug", `Requesting resource templates from MCP server`);
+-		return await this.client.listResourceTemplates({ _meta: this.requestMeta() }, { timeout: this.timeout });
++		return await this.client.listResourceTemplates({ _meta: this.requestMeta() }, { timeout: this.timeout, signal: options?.signal });
+ 	}
+ 	/**
+ 	* Fetch the list of available prompts from the MCP server.
+ 	*/
+-	async listPrompts() {
++	async listPromptsPage(cursor, options) { return this.client.listPrompts({ _meta: this.requestMeta(), ...(cursor === void 0 ? {} : { cursor }) }, { timeout: this.timeout, signal: options?.signal, pagination: "page" }); }
++	async listPrompts(options) {
+ 		this.log("debug", `Requesting prompts from MCP server`);
+-		return await this.client.listPrompts({ _meta: this.requestMeta() }, { timeout: this.timeout });
++		return await this.client.listPrompts({ _meta: this.requestMeta() }, { timeout: this.timeout, signal: options?.signal });
+ 	}
+ 	/**
+ 	* Get a prompt and its dynamic messages from the server.
+ 	*/
+-	async getPrompt({ name, args }) {
++	async getPrompt({ name, args }, options) {
+ 		this.log("debug", `Requesting prompt from MCP server: ${name}`);
+ 		return await this.client.getPrompt({
+ 			name,
+ 			arguments: args,
+ 			_meta: this.requestMeta()
+-		}, { timeout: this.timeout });
++		}, { timeout: this.timeout, signal: options?.signal });
+ 	}
+ 	hasSubscriptionInterest() {
+ 		const interest = this.subscriptionInterest;
+@@ -16550,7 +16564,11 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 	*/
+ 	async replaceSubscriptionStream() {
+ 		const negotiated = this.negotiatedProtocolVersion;
+-		if (negotiated !== void 0 && negotiated !== "2026-07-28" && this.subscriptionInterest.resourceSubscriptions.size === 0) {
++		if (negotiated !== void 0 && negotiated !== "2026-07-28") {
++			if (this.legacyResourceTransport !== this.transport) { this.legacyResourceTransport = this.transport; this.legacyResourceSubscriptions = new Set(); }
++			const desired = this.subscriptionInterest.resourceSubscriptions;
++			for (const uri of this.legacyResourceSubscriptions) if (!desired.has(uri)) { await this.client.unsubscribeResource({ uri }, { timeout: this.timeout }); this.legacyResourceSubscriptions.delete(uri); }
++			for (const uri of desired) if (!this.legacyResourceSubscriptions.has(uri)) { await this.client.subscribeResource({ uri }, { timeout: this.timeout }); this.legacyResourceSubscriptions.add(uri); }
+ 			const previous = this.subscriptionStream;
+ 			this.subscriptionStream = void 0;
+ 			await previous?.close();
+@@ -16635,7 +16653,7 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 	}
+ 	setResourceUpdatedNotificationHandler(handler) {
+ 		this.client.setNotificationHandler("notifications/resources/updated", (notification) => {
+-			handler(notification.params);
++			if (this.subscriptionInterest.resourceSubscriptions.has(notification.params.uri)) handler(notification.params);
+ 		});
+ 	}
+ 	async setResourceListChangedNotificationHandler(handler) {
+@@ -16941,7 +16959,7 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 				title,
+ 				description: tool.description || "",
+ 				inputSchema: this.convertInputSchema(tool.inputSchema),
+-				outputSchema: this.convertOutputSchema(tool.outputSchema),
++				outputSchema: this.serverConfig.preserveResultEnvelope ? z.unknown() : this.convertOutputSchema(tool.outputSchema),
+ 				strict: getMastraToolStrictMeta(toolMeta),
+ 				...mcpToolProps,
+ 				requireApproval,
+@@ -16953,7 +16971,7 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 					forwardInstructions: this.forwardInstructions,
+ 					instructionsMaxLength: this.instructionsMaxLength
+ 				},
+-				...tool.outputSchema ? { toModelOutput: createStructuredToolToModelOutput() } : {},
++				...this.serverConfig.preserveResultEnvelope ? { toModelOutput: (output) => ({ type: "json", value: output }) } : tool.outputSchema ? { toModelOutput: createStructuredToolToModelOutput() } : {},
+ 				execute: async (input, context) => {
+ 					if (serverMeta.connectFirst) await this.connect();
+ 					const operationContext = context?.requestContext ?? null;
+@@ -16968,23 +16986,30 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 								...context?._meta,
+ 								...progressMeta
+ 							}, context?.tracingContext?.currentSpan);
+-							const { result: res, serverSpan } = takeServerTraceContext(await this.client.callTool({
++							let observedResult, nativeResult;
++							try { nativeResult = await this.client.callTool({
+ 								name: tool.name,
+ 								arguments: input,
+ 								..._meta ? { _meta } : {}
+ 							}, {
+ 								timeout: this.timeout,
+-								signal: context?.abortSignal
+-							}));
++								signal: context?.abortSignal,
++								...this.serverConfig.preserveResultEnvelope ? { onResult: (result) => { observedResult = result; } } : {},
++								...this.serverConfig.onToolProgress ? { onprogress: (progress) => { try { this.serverConfig.onToolProgress({ progress: progress.progress, ...progress.total !== void 0 ? { total: progress.total } : {}, ...progress.message !== void 0 ? { message: progress.message } : {} }, context); } catch (error) { try { this.log("warn", "MCP progress observer failed", { error: error instanceof Error ? error.message : String(error) }); } catch {} } } } : {}
++							}); } catch (error) {
++								if (this.serverConfig.preserveResultEnvelope && observedResult !== void 0 && error instanceof ProtocolError) return { version: 1, result: observedResult, packetReceived: true, validated: false, validationError: { error: true, message: error.message, code: error.code } };
++								throw error;
++							}
++							const { result: res, serverSpan } = takeServerTraceContext(nativeResult);
+ 							const toolCallSpan = context?.tracingContext?.currentSpan;
+ 							if (toolCallSpan && serverSpan) toolCallSpan.links = [...toolCallSpan.links ?? [], serverSpan];
+ 							const task = this.taskOptions ? takeTaskHandle(res) : void 0;
+-							if (!task) return finishToolCall(res);
++							if (!task) return finishToolCall(res, observedResult ?? nativeResult);
+ 							this.log("debug", `Tool ${tool.name} continues as MCP task ${task.taskId}`);
+ 							toolCallSpan?.update({ metadata: { mcpTaskKey: taskKeyOf(task.taskId) } });
+ 							return finishToolCall(await this.awaitToolTask(tool.name, task, context?.abortSignal, context?.writer));
+ 						};
+-						const finishToolCall = async (res) => {
++						const finishToolCall = async (res, originalResult = res) => {
+ 							if (res.isError && this.onToolError === "throw") {
+ 								const errorText = extractToolErrorText(res.content);
+ 								this.log("debug", `Tool reported an error: ${tool.name}`, { error: errorText });
+@@ -17007,12 +17032,12 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 									const validation = validateToolOutput(validationSchema, res.structuredContent, tool.name);
+ 									if (validation.error) {
+ 										this.log("debug", `Tool output failed schema validation: ${tool.name}`, { message: validation.error.message });
+-										return validation.error;
++										return this.serverConfig.preserveResultEnvelope ? { version: 1, result: originalResult, packetReceived: true, validated: false, validationError: validation.error } : validation.error;
+ 									}
+ 								}
+-								return attachMcpCallToolContent(res.structuredContent, res.content, res._meta ? this.stampServerIdInMeta(res._meta) : void 0);
++								return this.serverConfig.preserveResultEnvelope ? { version: 1, result: originalResult, packetReceived: true, validated: true } : attachMcpCallToolContent(res.structuredContent, res.content, res._meta ? this.stampServerIdInMeta(res._meta) : void 0);
+ 							}
+-							return res;
++							return this.serverConfig.preserveResultEnvelope ? { version: 1, result: originalResult, packetReceived: true, validated: true } : res;
+ 						};
+ 						const failedTransport = this.transport;
+ 						const lifecycleGeneration = this.lifecycleGeneration;
+@@ -17021,6 +17046,20 @@ var InternalMastraMCPClient = class extends MastraBase {
+ 						} catch (e) {
+ 							if (!(e instanceof MastraError && (e.id === "MCP_CLIENT_TOOL_EXECUTION_FAILED" || e.id.startsWith("MCP_CLIENT_TOOL_TASK_"))) && isReconnectableMCPError(e)) {
+ 								this.log("debug", `Transport error detected for tool ${tool.name}, attempting reconnection...`, { error: e instanceof Error ? e.message : String(e) });
++                                if (this.serverConfig.toolCallRetry === "never") {
++                                    const uncertain = (cause) => new MastraError({
++                                        id: "MCP_CLIENT_TOOL_OUTCOME_UNCERTAIN",
++                                        domain: ErrorDomain.MCP,
++                                        category: ErrorCategory.THIRD_PARTY,
++                                        text: "MCP call outcome is uncertain: the request may already have been dispatched. It was not replayed; verify its effect before invoking it again.",
++                                        details: { toolName: tool.name, serverName: this.name, outcomeUncertain: true }
++                                    }, cause);
++                                    if (context?.abortSignal?.aborted) throw e;
++                                    try { await this.reconnectAfterTransportFailure(failedTransport, lifecycleGeneration); }
++                                    catch (recoveryError) { throw uncertain(recoveryError); }
++                                    throw uncertain(e);
++                                }
++
+ 								try {
+ 									await this.reconnectAfterTransportFailure(failedTransport, lifecycleGeneration);
+ 									this.log("debug", `Retrying tool ${tool.name} after reconnection...`);
+@@ -18225,6 +18264,9 @@ To fix this you have three different options:
+ 	get resources() {
+ 		this.addToInstanceCache();
+ 		return {
++			page: async (serverName, cursor, options) => (await this.getConnectedClientForServer(serverName)).resources.page(cursor, options),
++			templatesPage: async (serverName, cursor, options) => (await this.getConnectedClientForServer(serverName)).resources.templatesPage(cursor, options),
++			readWithMetadata: async (serverName, uri, options) => (await this.getConnectedClientForServer(serverName)).resources.readWithMetadata(uri, options),
+ 			/**
+ 			* Lists all available resources from all configured servers.
+ 			*
+@@ -18239,7 +18281,7 @@ To fix this you have three different options:
+ 			* console.log(resources.weatherServer); // Array of resources
+ 			* ```
+ 			*/
+-			list: async () => (await this.listResourcesWithErrors()).resources,
++			list: async (options) => (await this.listResourcesWithErrors(options)).resources,
+ 			/**
+ 			* Lists resources while preserving per-server discovery failures.
+ 			* The existing `list()` method remains the success-only convenience API.
+@@ -18259,7 +18301,7 @@ To fix this you have three different options:
+ 			* console.log(templates.weatherServer); // Array of resource templates
+ 			* ```
+ 			*/
+-			templates: async () => (await this.listResourceTemplatesWithErrors()).templates,
++			templates: async (options) => (await this.listResourceTemplatesWithErrors(options)).templates,
+ 			/**
+ 			* Lists resource templates while preserving per-server discovery failures.
+ 			* The existing `templates()` method remains the success-only convenience API.
+@@ -18279,9 +18321,9 @@ To fix this you have three different options:
+ 			* console.log(content.contents[0].text);
+ 			* ```
+ 			*/
+-			read: async (serverName, uri) => {
++			read: async (serverName, uri, options) => {
+ 				try {
+-					return (await this.getConnectedClientForServer(serverName)).resources.read(uri);
++					return (await this.getConnectedClientForServer(serverName)).resources.read(uri, options);
+ 				} catch (error) {
+ 					throw new MastraError({
+ 						id: "MCP_CLIENT_READ_RESOURCE_FAILED",
+@@ -18429,6 +18471,7 @@ To fix this you have three different options:
+ 	get prompts() {
+ 		this.addToInstanceCache();
+ 		return {
++			page: async (serverName, cursor, options) => (await this.getConnectedClientForServer(serverName)).prompts.page(cursor, options),
+ 			/**
+ 			* Lists all available prompts from all configured servers.
+ 			*
+@@ -18443,7 +18486,7 @@ To fix this you have three different options:
+ 			* console.log(prompts.weatherServer); // Array of prompts
+ 			* ```
+ 			*/
+-			list: async () => (await this.listPromptsWithErrors()).prompts,
++			list: async (options) => (await this.listPromptsWithErrors(options)).prompts,
+ 			/**
+ 			* Lists prompts while preserving per-server discovery failures.
+ 			* The existing `list()` method remains the success-only convenience API.
+@@ -18469,12 +18512,12 @@ To fix this you have three different options:
+ 			* console.log(prompt.messages);
+ 			* ```
+ 			*/
+-			get: async ({ serverName, name, args }) => {
++			get: async ({ serverName, name, args }, options) => {
+ 				try {
+ 					return (await this.getConnectedClientForServer(serverName)).prompts.get({
+ 						name,
+ 						args
+-					});
++					}, options);
+ 				} catch (error) {
+ 					throw new MastraError({
+ 						id: "MCP_CLIENT_GET_PROMPT_FAILED",
+@@ -18588,6 +18631,7 @@ onListChanged: async (serverName, handler) => {
+ 	* });
+ 	* ```
+ 	*/
++	async notifyRootsChanged(serverName) { return (await this.getConnectedClientForServer(serverName)).notifyRootsChanged(); }
+ 	async disconnect() {
+ 		if (this.disconnectPromise) return this.disconnectPromise;
+ 		this.disconnectPromise = (async () => {
+@@ -19016,7 +19060,7 @@ onListChanged: async (serverName, handler) => {
+ 		return tools;
+ 	}
+ 	async listResourcesWithErrors(options) {
+-		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).resources.list(), {
++		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).resources.list(options), {
+ 			errorId: "MCP_CLIENT_LIST_RESOURCES_FAILED",
+ 			logMessage: "Failed to list resources from server:"
+ 		}, options);
+@@ -19026,7 +19070,7 @@ onListChanged: async (serverName, handler) => {
+ 		};
+ 	}
+ 	async listResourceTemplatesWithErrors(options) {
+-		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).resources.templates(), {
++		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).resources.templates(options), {
+ 			errorId: "MCP_CLIENT_LIST_RESOURCE_TEMPLATES_FAILED",
+ 			logMessage: "Failed to list resource templates from server:"
+ 		}, options);
+@@ -19036,7 +19080,7 @@ onListChanged: async (serverName, handler) => {
+ 		};
+ 	}
+ 	async listPromptsWithErrors(options) {
+-		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).prompts.list(), {
++		const { values, ...diagnostics } = await this.discoverValuesWithErrors(async (serverName) => (await this.getConnectedClientForServer(serverName)).prompts.list(options), {
+ 			errorId: "MCP_CLIENT_LIST_PROMPTS_FAILED",
+ 			logMessage: "Failed to list prompts from server:"
+ 		}, options);

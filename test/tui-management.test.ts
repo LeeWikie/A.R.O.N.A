@@ -25,12 +25,12 @@ test('management forms submit typed backend contracts and revisions', async () =
   let choices: string[] = [], prompts: string[] = [];
   target.choose = async () => choices.shift(); target.prompt = async () => prompts.shift(); target.promptLong = async () => prompts.shift();
   try {
-    choices = ['root', 'safe', 'yes']; prompts = ['Title', 'Do work']; await target.createTask();
+    choices = ['safe', 'yes']; prompts = ['Title', 'Do work']; await target.createTask();
     assert.deepEqual(calls.find(x => x.route === '/tasks' && x.method === 'POST')?.body, { title: 'Title', content: 'Do work', workspaceId: 'root', returnContextId: 'main' });
     choices = ['duty', 'cancel', 'yes']; await target.schedules();
     assert.deepEqual(calls.find(x => x.route === '/schedules/duty/cancel')?.body, { revision: 7 });
     choices = ['__add__', 'interval', 'message', 'yes']; prompts = ['Repeated', 'Check work', '2027-01-01T00:00:00Z', '60000', 'UTC']; await target.schedules();
-    assert.deepEqual(calls.find(x => x.route === '/schedules' && x.method === 'POST')?.body, { version: 2, name: 'Repeated', task: 'Check work', contextId: 'main', timing: { kind: 'interval', anchorAt: '2027-01-01T00:00:00Z', everyMs: 60000 }, timezone: 'UTC', output: { kind: 'message', contextId: 'main' } });
+    assert.deepEqual(calls.find(x => x.route === '/schedules' && x.method === 'POST')?.body, { version: 2, name: 'Repeated', task: 'Check work', timing: { kind: 'interval', anchorAt: '2027-01-01T00:00:00Z', everyMs: 60000 }, timezone: 'UTC', output: { kind: 'message', contextId: 'main' } });
     choices = ['server:server', 'connect', 'yes']; await target.mcp();
     assert.deepEqual(calls.find(x => x.route === '/mcp/server/connect')?.body, {});
     choices = ['method', 'toggle']; await target.methods();

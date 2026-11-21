@@ -1,0 +1,881 @@
+diff --git a/dist/agent/types.d.ts b/dist/agent/types.d.ts
+index dc95757b47160cbb159516c14c62f2fa3b8bb0b2..a196ca291f11194e098bd7641c150b79fe50d986 100644
+--- a/dist/agent/types.d.ts
++++ b/dist/agent/types.d.ts
+@@ -226,6 +226,8 @@ export interface SendAgentSignalResult<OUTPUT = unknown> {
+ export type SendAgentMessageOptions<OUTPUT = unknown> = SendAgentSignalOptions<OUTPUT>;
+ export type SendAgentMessageResult<OUTPUT = unknown> = SendAgentSignalResult<OUTPUT>;
+ export type QueueAgentMessageOptions<OUTPUT = unknown> = SendAgentSignalOptions<OUTPUT> & {
++    /** Reserved identity for the next queued run, owned by this resource and thread. */
++    queuedRunId?: string;
+     /** Local grouping metadata for queue observation and cancellation. It is not serialized or authorization. */
+     queueOwnerId?: string;
+ };
+diff --git a/dist/agent-CMG1T8W5.cjs b/dist/agent-CMG1T8W5.cjs
+index f7fda80138ba7967336f3e0da2bb094c130f5eaf..e59c789b243c5ca3fd0606a237b6f01002834fd8 100644
+--- a/dist/agent-CMG1T8W5.cjs
++++ b/dist/agent-CMG1T8W5.cjs
+@@ -1,3 +1,4 @@
++const nativeToolArgumentsEqual = require("node:util").isDeepStrictEqual;
+ const require_rolldown_runtime = require("./rolldown-runtime-BrhgMLW6.cjs");
+ const require_logger = require("./logger-CvzZYuJd.cjs");
+ const require_base = require("./base-BIzR1D3_.cjs");
+@@ -27327,7 +27328,8 @@ var SafeRegExp = class extends RegExp {
+ * `patternProperties` run in linear time; unsupported syntax throws while the schema compiles.
+ */
+ function resolveZodSchema(zodString) {
+-	return Function("z", "RegExp", `"use strict";return (${zodString});`)(zod_v4.z, SafeRegExp);
++	return Function("z", "RegExp", `"use strict";
++return (${zodString});`)(zod_v4.z, SafeRegExp);
+ }
+ const NON_SCHEMA_KEYWORDS = /* @__PURE__ */ new Set([
+ 	"const",
+@@ -32946,6 +32948,25 @@ function getToolResultInvocationState(payload) {
+ * 5. Skip empty text spans (empty-string deltas only) — no more empty text parts in DB
+ * 6. Merge tool-call + tool-result into a single part with state: 'result' when applicable
+ */
++function messageContentOrder(chunks) {
++ const calls = new Map(), starts = new Map(), positions = new Map(chunks.map((chunk, index) => [chunk, index]));
++ for (const chunk of chunks) {
++  if (chunk.type !== "tool-call" && chunk.type !== "tool-call-input-streaming-start") continue;
++  const map = chunk.type === "tool-call" ? calls : starts, id = chunk.payload.toolCallId;
++  if (map.has(id)) map.set(id, null);
++  else map.set(id, chunk);
++ }
++ // Complete calls retain their original input span position only in the message projection.
++ const folded = new Set(), output = [];
++ for (const chunk of chunks) {
++  if (chunk.type === "tool-call-input-streaming-start") {
++   const call = calls.get(chunk.payload.toolCallId);
++   if (call && starts.get(chunk.payload.toolCallId) === chunk && positions.get(call) > positions.get(chunk)) { output.push(call); folded.add(call); continue; }
++  }
++  if (!folded.has(chunk)) output.push(chunk);
++ }
++ return output;
++}
+ function buildMessagesFromChunks({ chunks, messageId, responseModelMetadata, tools }) {
+ 	const parts = [];
+ 	const toolResults = /* @__PURE__ */ new Map();
+@@ -32961,7 +32982,7 @@ function buildMessagesFromChunks({ chunks, messageId, responseModelMetadata, too
+ 		});
+ 	}
+ 	const spans = new MessagePartSpans();
+-	for (const chunk of chunks) {
++	for (const chunk of messageContentOrder(chunks)) {
+ 		if (isSpanChunk(chunk)) {
+ 			spans.fold(parts, chunk);
+ 			continue;
+@@ -33915,6 +33936,110 @@ function executeStreamWithFallbackModels(models, logger, startIndex = 0, throwIf
+ 		return finalResult;
+ 	};
+ }
++function uniqueToolOccurrences(stream, messageId, providerExecution = () => undefined) {
++ const entries = new Map(), counts = new Map(), used = new Set(), inputIds = new Map();
++ const ambiguous = () => {
++  const error = new Error('Ambiguous provider tool call identity');
++  error.name = 'ToolCallIdentityError';
++  error.code = 'tool_call_identity_ambiguous';
++  return error;
++ };
++ const create = (raw, toolName, open, inputId) => {
++  if (inputId !== undefined && inputIds.has(inputId)) throw ambiguous();
++  const occurrence = counts.get(raw) ?? 0;
++  counts.set(raw, occurrence + 1);
++  let nativeId = raw;
++  if (used.has(nativeId)) {
++   let salt = 0;
++   do {
++    nativeId = 'call_' + crypto$1.createHash('sha256').update(JSON.stringify([messageId, raw, occurrence, salt++])).digest('hex').slice(0, 40);
++   } while (used.has(nativeId));
++  }
++  used.add(nativeId);
++  const entry = {raw, nativeId, occurrence, toolName, open, inputId, text: '', parsed: false, validArguments: false, arguments: undefined, providerExecuted: undefined, called: false, resolved: false};
++  const all = entries.get(raw) ?? [];
++  if (inputId !== undefined) inputIds.set(inputId, entry);
++  all.push(entry);
++  entries.set(raw, all);
++  return entry;
++ };
++ const parseArguments = entry => {
++  if (!entry.parsed) {
++   entry.parsed = true;
++   try { entry.arguments = JSON.parse(entry.text); entry.validArguments = true; } catch {}
++   entry.text = '';
++  }
++ };
++ return stream.pipeThrough(new TransformStream({transform(chunk, controller) {
++  const payload = chunk.payload, raw = payload?.toolCallId;
++  if (typeof raw !== 'string' || !['tool-call-input-streaming-start', 'tool-call-delta', 'tool-call-input-streaming-end', 'tool-call', 'tool-result', 'tool-error'].includes(chunk.type)) {
++   controller.enqueue(chunk);
++   return;
++  }
++  const all = entries.get(raw) ?? [], inputId = payload.providerMetadata?.mastra?.toolCallInputId;
++  if (inputId !== undefined && (typeof inputId !== 'string' || !inputId.length)) throw ambiguous();
++  let entry;
++  if (chunk.type === 'tool-call-input-streaming-start') {
++   if (all.some(item => item.open)) throw ambiguous();
++   entry = create(raw, payload.toolName, true, inputId);
++  } else if (chunk.type === 'tool-call-delta' || chunk.type === 'tool-call-input-streaming-end') {
++   const active = all.filter(item => item.open);
++   if (active.length !== 1) throw ambiguous();
++   entry = active[0];
++   if (entry.inputId !== inputId) throw ambiguous();
++   if (chunk.type === 'tool-call-delta') entry.text += payload.argsTextDelta ?? '';
++   else { entry.open = false; parseArguments(entry); }
++  } else if (chunk.type === 'tool-call') {
++   const pending = all.filter(item => !item.called);
++   // Providers can defer complete calls until several sequential input blocks have closed.
++   const matching = pending.filter(item => {
++    if (item.inputId !== inputId) return false;
++    if (item.toolName && payload.toolName && item.toolName !== payload.toolName) return false;
++    parseArguments(item);
++    return item.validArguments && nativeToolArgumentsEqual(item.arguments, payload.args);
++   });
++   if (inputId !== undefined) {
++    const owner = inputIds.get(inputId);
++    if (owner && (owner.raw !== raw || owner.called || !pending.includes(owner))) throw ambiguous();
++    if (owner && owner.toolName && payload.toolName && owner.toolName !== payload.toolName) throw ambiguous();
++    if (owner) entry = owner;
++    else if (pending.length) throw ambiguous();
++    else entry = create(raw, payload.toolName, false, inputId);
++   }
++   if (!entry) {
++    if (matching.length > 1) throw ambiguous();
++   if (matching.length === 1) entry = matching[0];
++   else if (pending.length === 1 && pending[0].inputId === inputId && (!pending[0].toolName || !payload.toolName || pending[0].toolName === payload.toolName)) entry = pending[0];
++   else if (pending.length) throw ambiguous();
++   else entry = create(raw, payload.toolName, false, inputId);
++   }
++   entry.providerExecuted = payload.providerExecuted ?? providerExecution(payload.toolName);
++   entry.called = true;
++   entry.open = false;
++   entry.toolName = payload.toolName;
++  } else {
++   const candidates = all.filter(item => item.called && !item.resolved && (!payload.toolName || item.toolName === payload.toolName) && (inputId === undefined || item.inputId === inputId));
++   if (inputId !== undefined && (!inputIds.has(inputId) || inputIds.get(inputId).raw !== raw)) throw ambiguous();
++   const owner = payload.providerExecuted ?? providerExecution(payload.toolName);
++   const inferred = owner === undefined && candidates.some(item => item.providerExecuted === true) ? true : owner;
++   const pending = inferred === undefined ? candidates : candidates.filter(item => item.providerExecuted === inferred || item.providerExecuted === undefined);
++   if (pending.length === 0 && all.length === 0) { controller.enqueue(chunk); return; }
++   if (pending.length !== 1) throw ambiguous();
++   entry = pending[0];
++   entry.resolved = true;
++  }
++  const next = {...payload, toolCallId: entry.nativeId};
++  if (entry.nativeId !== raw) next.providerMetadata = {
++   ...payload.providerMetadata,
++   mastra: {...payload.providerMetadata?.mastra, nativeToolCallIdentity: {
++    version: 1, providerToolCallId: raw, messageId, occurrence: entry.occurrence, nativeToolCallId: entry.nativeId,
++    ...(Object.prototype.hasOwnProperty.call(payload.providerMetadata?.mastra ?? {}, 'nativeToolCallIdentity') ? {originalProviderIdentity: payload.providerMetadata.mastra.nativeToolCallIdentity} : {})
++   }}
++  };
++  controller.enqueue({...chunk, payload: next});
++ }}));
++}
++
+ function createLLMExecutionStep({ models, _internal, messageId: messageIdPassed, runId, tools, toolChoice, activeTools, messageList, includeRawChunks, modelSettings, providerOptions, options, toolCallStreaming, controller, structuredOutput, outputProcessors, inputProcessors, llmRequestInputProcessors, errorProcessors, hasConfiguredErrorProcessors, logger, agentId, agent, downloadRetries, downloadConcurrency, processorStates, requestContext, methodType, requireToolApproval, toolCallConcurrency, toolCallForeachOptions, modelSpanTracker, autoResumeSuspendedTools, maxProcessorRetries, workspace, outputWriter, mastra, rotateResponseMessageId: rotateLoopResponseMessageId, eagerCoordinator, eagerToolCallStep, runAbortSignal }) {
+ 	let initialUntaggedSystemMessages;
+ 	const configuredToolCallConcurrency = resolveConfiguredToolCallConcurrency(toolCallConcurrency);
+@@ -34128,6 +34253,7 @@ function createLLMExecutionStep({ models, _internal, messageId: messageIdPassed,
+ 			const drainPendingSignals = readScoped(scopeCtx, DRAIN_PENDING_SIGNALS_KEY, "drainPendingSignals");
+ 			const queuedSignals = [...(inputData.output?.steps?.length ?? 0) === 0 ? drainPendingSignals?.(runId, "pre-run") ?? [] : [], ...currentIteration > 1 ? drainPendingSignals?.(runId, "pending") ?? [] : []];
+ 			if (queuedSignals.length) currentMessageId = rotateLoopResponseMessageId();
++			else if (currentIteration > 1 && messageList.get.all.db().some((message) => message.id === currentMessageId)) currentMessageId = rotateLoopResponseMessageId(currentMessageId);
+ 			for (const signal of queuedSignals) require_trip_wire.safeEnqueue(controller, messageList.addSignal(signal).toDataPart());
+ 			interruptible = true;
+ 			processorPartCounts = new Map([...processorStates?.values() ?? []].map((state) => [state, state.streamParts.length]));
+@@ -34572,7 +34698,7 @@ function createLLMExecutionStep({ models, _internal, messageId: messageIdPassed,
+ 					start: 0,
+ 					end: 0
+ 				};
+-				const providerStream = modelSpanTracker?.wrapInferenceStream?.(modelResult) ?? modelResult;
++				const providerStream = uniqueToolOccurrences(modelSpanTracker?.wrapInferenceStream?.(modelResult) ?? modelResult, currentStep.messageId, name => inferProviderExecuted(void 0, currentStep.tools?.[name] ?? findProviderToolByName(currentStep.tools, name)));
+ 				const outputStream = new require_trip_wire.MastraModelOutput({
+ 					model: {
+ 						modelId: currentStep.model.modelId,
+@@ -37456,6 +37582,7 @@ function createToolCallStep({ tools, messageList, options, outputWriter, control
+ 				const toolOptions = {
+ 					abortSignal,
+ 					toolCallId: inputData.toolCallId,
++					messageId: stepResponseMessageId,
+ 					messages: isAgentTool ? readScoped(scopeCtx, STEP_MODEL_MESSAGES_KEY, "stepModelMessages") ?? messageList.get.all.aiV5.model() : messageList.get.input.aiV5.model(),
+ 					getMessages: () => messageList.get.all.db(),
+ 					outputWriter: stepOutputWriter,
+@@ -43710,7 +43837,13 @@ var AgentThreadStreamRuntime = class {
+ 			}),
+ 			acceptedAt
+ 		});
+-		const queuedRunId = globalThis.crypto.randomUUID();
++		const queuedRunId = target.queuedRunId ?? globalThis.crypto.randomUUID();
++		if (target.queuedRunId !== void 0) {
++			if (typeof queuedRunId !== "string" || !queuedRunId.length || queuedRunId.length > 200 || /[\u0000-\u001f]/.test(queuedRunId)) throw new Error("Invalid reserved queued run identity");
++			const ownerKey = state.threadKeysByRunId.get(queuedRunId) ?? state.remoteThreadKeysByRunId.get(queuedRunId);
++			if (ownerKey && ownerKey !== key) throw new Error("Reserved queued run belongs to another thread");
++			if (state.threadRunsById.has(queuedRunId) || state.abortedRunIds.has(queuedRunId) || state.startingQueuedRunIds.has(queuedRunId) || [...state.pendingThreadAdmissions.values()].some(value => value.runId === queuedRunId) || [...state.pendingIdleSignalsByThread.values()].some(values => values.some(value => value.runId === queuedRunId)) || [...state.pendingContinuationsByThread.values()].some(values => values.some(value => value.runId === queuedRunId))) throw new Error("Reserved queued run is already in use");
++		}
+ 		const baseQueuedStreamOptions = target.ifIdle?.streamOptions ?? {
+ 			...activeRecord?.streamOptions,
+ 			abortSignal: void 0
+@@ -43979,7 +44112,7 @@ var AgentThreadStreamRuntime = class {
+ 				};
+ 			}
+ 		}
+-		runId = globalThis.crypto.randomUUID();
++		runId = waitForIdle && target.queuedRunId !== void 0 ? target.queuedRunId : globalThis.crypto.randomUUID();
+ 		key ??= this.#threadKey(resourceId, threadId);
+ 		if (idleBehavior === "persist") {
+ 			if (signal.transient) return {
+@@ -52363,11 +52496,15 @@ function workflowLoopStream({ resumeContext, requireToolApproval, models, toolCh
+ 	let failure;
+ 	return new stream_web.ReadableStream({
+ 		start: async (streamController) => {
++			const execution = loopSource.start(streamController);
++			const releaseExecution = rest.mastra?.__trackEventedRun(execution);
+ 			try {
+-				await loopSource.start(streamController);
++				await execution;
+ 			} catch (error) {
+ 				reportTerminalTracingError(error);
+ 				failure = { error };
++			} finally {
++				releaseExecution?.();
+ 			}
+ 		},
+ 		pull: (streamController) => {
+@@ -52498,7 +52635,14 @@ function loop({ resumeContext, models, logger, runId, idGenerator, messageList,
+ 		initialState: initialStreamState,
+ 		onTracingTripwire: rest.onTracingTripwire,
+ 		onFinishComplete: async () => {
+-			await finalizeRun?.();
++			const cleanup = finalizeRun?.();
++			if (!cleanup) return;
++			const releaseCleanup = rest.mastra?.__trackEventedRun(cleanup);
++			try {
++				await cleanup;
++			} finally {
++				releaseCleanup?.();
++			}
+ 		}
+ 	});
+ 	return require_trip_wire.createDestructurableOutput(modelOutput);
+@@ -56479,7 +56623,7 @@ function createMapResultsStep({ capabilities, options, resourceId, threadId: thr
+ 				if (options.savePerStep && !require_trip_wire.isObservationalMemoryEnabled(memoryConfig?.observationalMemory) && !memoryConfig?.readOnly) {
+ 					if (memoryData.thread?.id) await authorizeMemory(require_ee_CAe_UJ9n.MastraFGAPermissions.MEMORY_WRITE, memoryData.thread.id);
+ 					await ensureThreadExists();
+-					if (saveQueueManager && memoryData.thread?.id) await saveQueueManager.flushMessages(messageList, memoryData.thread.id, memoryConfig);
++					if (saveQueueManager && memoryData.thread?.id) await saveQueueManager.flushMessages(messageList, memoryData.thread.id, memoryConfig, { throwOnError: true });
+ 				}
+ 				return options.onStepFinish?.({
+ 					...props,
+diff --git a/dist/agent-DtdQ6un6.js b/dist/agent-DtdQ6un6.js
+index 72ec9b56afe4c628fe2d3c087f9189411bc8e480..f35ae111a21510bca82df6c31392ea184ca74e2f 100644
+--- a/dist/agent-DtdQ6un6.js
++++ b/dist/agent-DtdQ6un6.js
+@@ -1,3 +1,4 @@
++import {isDeepStrictEqual as nativeToolArgumentsEqual} from "node:util";
+ import { i as __toESM, t as __commonJSMin } from "./rolldown-runtime-tIEjjQTE.js";
+ import { a as RegisteredLogger, t as ConsoleLogger, u as noopLogger } from "./logger-BwbmRqfc.js";
+ import { t as MastraBase } from "./base-CKLWBhDo.js";
+@@ -32942,6 +32943,25 @@ function getToolResultInvocationState(payload) {
+ * 5. Skip empty text spans (empty-string deltas only) — no more empty text parts in DB
+ * 6. Merge tool-call + tool-result into a single part with state: 'result' when applicable
+ */
++function messageContentOrder(chunks) {
++ const calls = new Map(), starts = new Map(), positions = new Map(chunks.map((chunk, index) => [chunk, index]));
++ for (const chunk of chunks) {
++  if (chunk.type !== "tool-call" && chunk.type !== "tool-call-input-streaming-start") continue;
++  const map = chunk.type === "tool-call" ? calls : starts, id = chunk.payload.toolCallId;
++  if (map.has(id)) map.set(id, null);
++  else map.set(id, chunk);
++ }
++ // Complete calls retain their original input span position only in the message projection.
++ const folded = new Set(), output = [];
++ for (const chunk of chunks) {
++  if (chunk.type === "tool-call-input-streaming-start") {
++   const call = calls.get(chunk.payload.toolCallId);
++   if (call && starts.get(chunk.payload.toolCallId) === chunk && positions.get(call) > positions.get(chunk)) { output.push(call); folded.add(call); continue; }
++  }
++  if (!folded.has(chunk)) output.push(chunk);
++ }
++ return output;
++}
+ function buildMessagesFromChunks({ chunks, messageId, responseModelMetadata, tools }) {
+ 	const parts = [];
+ 	const toolResults = /* @__PURE__ */ new Map();
+@@ -32957,7 +32977,7 @@ function buildMessagesFromChunks({ chunks, messageId, responseModelMetadata, too
+ 		});
+ 	}
+ 	const spans = new MessagePartSpans();
+-	for (const chunk of chunks) {
++	for (const chunk of messageContentOrder(chunks)) {
+ 		if (isSpanChunk(chunk)) {
+ 			spans.fold(parts, chunk);
+ 			continue;
+@@ -33911,6 +33931,110 @@ function executeStreamWithFallbackModels(models, logger, startIndex = 0, throwIf
+ 		return finalResult;
+ 	};
+ }
++function uniqueToolOccurrences(stream, messageId, providerExecution = () => undefined) {
++ const entries = new Map(), counts = new Map(), used = new Set(), inputIds = new Map();
++ const ambiguous = () => {
++  const error = new Error('Ambiguous provider tool call identity');
++  error.name = 'ToolCallIdentityError';
++  error.code = 'tool_call_identity_ambiguous';
++  return error;
++ };
++ const create = (raw, toolName, open, inputId) => {
++  if (inputId !== undefined && inputIds.has(inputId)) throw ambiguous();
++  const occurrence = counts.get(raw) ?? 0;
++  counts.set(raw, occurrence + 1);
++  let nativeId = raw;
++  if (used.has(nativeId)) {
++   let salt = 0;
++   do {
++    nativeId = 'call_' + createHash('sha256').update(JSON.stringify([messageId, raw, occurrence, salt++])).digest('hex').slice(0, 40);
++   } while (used.has(nativeId));
++  }
++  used.add(nativeId);
++  const entry = {raw, nativeId, occurrence, toolName, open, inputId, text: '', parsed: false, validArguments: false, arguments: undefined, providerExecuted: undefined, called: false, resolved: false};
++  const all = entries.get(raw) ?? [];
++  if (inputId !== undefined) inputIds.set(inputId, entry);
++  all.push(entry);
++  entries.set(raw, all);
++  return entry;
++ };
++ const parseArguments = entry => {
++  if (!entry.parsed) {
++   entry.parsed = true;
++   try { entry.arguments = JSON.parse(entry.text); entry.validArguments = true; } catch {}
++   entry.text = '';
++  }
++ };
++ return stream.pipeThrough(new TransformStream({transform(chunk, controller) {
++  const payload = chunk.payload, raw = payload?.toolCallId;
++  if (typeof raw !== 'string' || !['tool-call-input-streaming-start', 'tool-call-delta', 'tool-call-input-streaming-end', 'tool-call', 'tool-result', 'tool-error'].includes(chunk.type)) {
++   controller.enqueue(chunk);
++   return;
++  }
++  const all = entries.get(raw) ?? [], inputId = payload.providerMetadata?.mastra?.toolCallInputId;
++  if (inputId !== undefined && (typeof inputId !== 'string' || !inputId.length)) throw ambiguous();
++  let entry;
++  if (chunk.type === 'tool-call-input-streaming-start') {
++   if (all.some(item => item.open)) throw ambiguous();
++   entry = create(raw, payload.toolName, true, inputId);
++  } else if (chunk.type === 'tool-call-delta' || chunk.type === 'tool-call-input-streaming-end') {
++   const active = all.filter(item => item.open);
++   if (active.length !== 1) throw ambiguous();
++   entry = active[0];
++   if (entry.inputId !== inputId) throw ambiguous();
++   if (chunk.type === 'tool-call-delta') entry.text += payload.argsTextDelta ?? '';
++   else { entry.open = false; parseArguments(entry); }
++  } else if (chunk.type === 'tool-call') {
++   const pending = all.filter(item => !item.called);
++   // Providers can defer complete calls until several sequential input blocks have closed.
++   const matching = pending.filter(item => {
++    if (item.inputId !== inputId) return false;
++    if (item.toolName && payload.toolName && item.toolName !== payload.toolName) return false;
++    parseArguments(item);
++    return item.validArguments && nativeToolArgumentsEqual(item.arguments, payload.args);
++   });
++   if (inputId !== undefined) {
++    const owner = inputIds.get(inputId);
++    if (owner && (owner.raw !== raw || owner.called || !pending.includes(owner))) throw ambiguous();
++    if (owner && owner.toolName && payload.toolName && owner.toolName !== payload.toolName) throw ambiguous();
++    if (owner) entry = owner;
++    else if (pending.length) throw ambiguous();
++    else entry = create(raw, payload.toolName, false, inputId);
++   }
++   if (!entry) {
++    if (matching.length > 1) throw ambiguous();
++   if (matching.length === 1) entry = matching[0];
++   else if (pending.length === 1 && pending[0].inputId === inputId && (!pending[0].toolName || !payload.toolName || pending[0].toolName === payload.toolName)) entry = pending[0];
++   else if (pending.length) throw ambiguous();
++   else entry = create(raw, payload.toolName, false, inputId);
++   }
++   entry.providerExecuted = payload.providerExecuted ?? providerExecution(payload.toolName);
++   entry.called = true;
++   entry.open = false;
++   entry.toolName = payload.toolName;
++  } else {
++   const candidates = all.filter(item => item.called && !item.resolved && (!payload.toolName || item.toolName === payload.toolName) && (inputId === undefined || item.inputId === inputId));
++   if (inputId !== undefined && (!inputIds.has(inputId) || inputIds.get(inputId).raw !== raw)) throw ambiguous();
++   const owner = payload.providerExecuted ?? providerExecution(payload.toolName);
++   const inferred = owner === undefined && candidates.some(item => item.providerExecuted === true) ? true : owner;
++   const pending = inferred === undefined ? candidates : candidates.filter(item => item.providerExecuted === inferred || item.providerExecuted === undefined);
++   if (pending.length === 0 && all.length === 0) { controller.enqueue(chunk); return; }
++   if (pending.length !== 1) throw ambiguous();
++   entry = pending[0];
++   entry.resolved = true;
++  }
++  const next = {...payload, toolCallId: entry.nativeId};
++  if (entry.nativeId !== raw) next.providerMetadata = {
++   ...payload.providerMetadata,
++   mastra: {...payload.providerMetadata?.mastra, nativeToolCallIdentity: {
++    version: 1, providerToolCallId: raw, messageId, occurrence: entry.occurrence, nativeToolCallId: entry.nativeId,
++    ...(Object.prototype.hasOwnProperty.call(payload.providerMetadata?.mastra ?? {}, 'nativeToolCallIdentity') ? {originalProviderIdentity: payload.providerMetadata.mastra.nativeToolCallIdentity} : {})
++   }}
++  };
++  controller.enqueue({...chunk, payload: next});
++ }}));
++}
++
+ function createLLMExecutionStep({ models, _internal, messageId: messageIdPassed, runId, tools, toolChoice, activeTools, messageList, includeRawChunks, modelSettings, providerOptions, options, toolCallStreaming, controller, structuredOutput, outputProcessors, inputProcessors, llmRequestInputProcessors, errorProcessors, hasConfiguredErrorProcessors, logger, agentId, agent, downloadRetries, downloadConcurrency, processorStates, requestContext, methodType, requireToolApproval, toolCallConcurrency, toolCallForeachOptions, modelSpanTracker, autoResumeSuspendedTools, maxProcessorRetries, workspace, outputWriter, mastra, rotateResponseMessageId: rotateLoopResponseMessageId, eagerCoordinator, eagerToolCallStep, runAbortSignal }) {
+ 	let initialUntaggedSystemMessages;
+ 	const configuredToolCallConcurrency = resolveConfiguredToolCallConcurrency(toolCallConcurrency);
+@@ -34124,6 +34248,7 @@ function createLLMExecutionStep({ models, _internal, messageId: messageIdPassed,
+ 			const drainPendingSignals = readScoped(scopeCtx, DRAIN_PENDING_SIGNALS_KEY, "drainPendingSignals");
+ 			const queuedSignals = [...(inputData.output?.steps?.length ?? 0) === 0 ? drainPendingSignals?.(runId, "pre-run") ?? [] : [], ...currentIteration > 1 ? drainPendingSignals?.(runId, "pending") ?? [] : []];
+ 			if (queuedSignals.length) currentMessageId = rotateLoopResponseMessageId();
++			else if (currentIteration > 1 && messageList.get.all.db().some((message) => message.id === currentMessageId)) currentMessageId = rotateLoopResponseMessageId(currentMessageId);
+ 			for (const signal of queuedSignals) safeEnqueue(controller, messageList.addSignal(signal).toDataPart());
+ 			interruptible = true;
+ 			processorPartCounts = new Map([...processorStates?.values() ?? []].map((state) => [state, state.streamParts.length]));
+@@ -34568,7 +34693,7 @@ function createLLMExecutionStep({ models, _internal, messageId: messageIdPassed,
+ 					start: 0,
+ 					end: 0
+ 				};
+-				const providerStream = modelSpanTracker?.wrapInferenceStream?.(modelResult) ?? modelResult;
++				const providerStream = uniqueToolOccurrences(modelSpanTracker?.wrapInferenceStream?.(modelResult) ?? modelResult, currentStep.messageId, name => inferProviderExecuted(void 0, currentStep.tools?.[name] ?? findProviderToolByName(currentStep.tools, name)));
+ 				const outputStream = new MastraModelOutput({
+ 					model: {
+ 						modelId: currentStep.model.modelId,
+@@ -37452,6 +37577,7 @@ function createToolCallStep({ tools, messageList, options, outputWriter, control
+ 				const toolOptions = {
+ 					abortSignal,
+ 					toolCallId: inputData.toolCallId,
++					messageId: stepResponseMessageId,
+ 					messages: isAgentTool ? readScoped(scopeCtx, STEP_MODEL_MESSAGES_KEY, "stepModelMessages") ?? messageList.get.all.aiV5.model() : messageList.get.input.aiV5.model(),
+ 					getMessages: () => messageList.get.all.db(),
+ 					outputWriter: stepOutputWriter,
+@@ -43706,7 +43832,13 @@ var AgentThreadStreamRuntime = class {
+ 			}),
+ 			acceptedAt
+ 		});
+-		const queuedRunId = globalThis.crypto.randomUUID();
++		const queuedRunId = target.queuedRunId ?? globalThis.crypto.randomUUID();
++		if (target.queuedRunId !== void 0) {
++			if (typeof queuedRunId !== "string" || !queuedRunId.length || queuedRunId.length > 200 || /[\u0000-\u001f]/.test(queuedRunId)) throw new Error("Invalid reserved queued run identity");
++			const ownerKey = state.threadKeysByRunId.get(queuedRunId) ?? state.remoteThreadKeysByRunId.get(queuedRunId);
++			if (ownerKey && ownerKey !== key) throw new Error("Reserved queued run belongs to another thread");
++			if (state.threadRunsById.has(queuedRunId) || state.abortedRunIds.has(queuedRunId) || state.startingQueuedRunIds.has(queuedRunId) || [...state.pendingThreadAdmissions.values()].some(value => value.runId === queuedRunId) || [...state.pendingIdleSignalsByThread.values()].some(values => values.some(value => value.runId === queuedRunId)) || [...state.pendingContinuationsByThread.values()].some(values => values.some(value => value.runId === queuedRunId))) throw new Error("Reserved queued run is already in use");
++		}
+ 		const baseQueuedStreamOptions = target.ifIdle?.streamOptions ?? {
+ 			...activeRecord?.streamOptions,
+ 			abortSignal: void 0
+@@ -43975,7 +44107,7 @@ var AgentThreadStreamRuntime = class {
+ 				};
+ 			}
+ 		}
+-		runId = globalThis.crypto.randomUUID();
++		runId = waitForIdle && target.queuedRunId !== void 0 ? target.queuedRunId : globalThis.crypto.randomUUID();
+ 		key ??= this.#threadKey(resourceId, threadId);
+ 		if (idleBehavior === "persist") {
+ 			if (signal.transient) return {
+@@ -52359,11 +52491,15 @@ function workflowLoopStream({ resumeContext, requireToolApproval, models, toolCh
+ 	let failure;
+ 	return new ReadableStream$1({
+ 		start: async (streamController) => {
++			const execution = loopSource.start(streamController);
++			const releaseExecution = rest.mastra?.__trackEventedRun(execution);
+ 			try {
+-				await loopSource.start(streamController);
++				await execution;
+ 			} catch (error) {
+ 				reportTerminalTracingError(error);
+ 				failure = { error };
++			} finally {
++				releaseExecution?.();
+ 			}
+ 		},
+ 		pull: (streamController) => {
+@@ -52494,7 +52630,14 @@ function loop({ resumeContext, models, logger, runId, idGenerator, messageList,
+ 		initialState: initialStreamState,
+ 		onTracingTripwire: rest.onTracingTripwire,
+ 		onFinishComplete: async () => {
+-			await finalizeRun?.();
++			const cleanup = finalizeRun?.();
++			if (!cleanup) return;
++			const releaseCleanup = rest.mastra?.__trackEventedRun(cleanup);
++			try {
++				await cleanup;
++			} finally {
++				releaseCleanup?.();
++			}
+ 		}
+ 	});
+ 	return createDestructurableOutput(modelOutput);
+@@ -56475,7 +56618,7 @@ function createMapResultsStep({ capabilities, options, resourceId, threadId: thr
+ 				if (options.savePerStep && !isObservationalMemoryEnabled$1(memoryConfig?.observationalMemory) && !memoryConfig?.readOnly) {
+ 					if (memoryData.thread?.id) await authorizeMemory(MastraFGAPermissions.MEMORY_WRITE, memoryData.thread.id);
+ 					await ensureThreadExists();
+-					if (saveQueueManager && memoryData.thread?.id) await saveQueueManager.flushMessages(messageList, memoryData.thread.id, memoryConfig);
++					if (saveQueueManager && memoryData.thread?.id) await saveQueueManager.flushMessages(messageList, memoryData.thread.id, memoryConfig, { throwOnError: true });
+ 				}
+ 				return options.onStepFinish?.({
+ 					...props,
+diff --git a/dist/background-tasks/manager.d.ts b/dist/background-tasks/manager.d.ts
+index 62176dff8a2604ba222f4386e7c45aa8aa51f0a9..7911bf67ce38f7ab2a32884fa1702e77a34980ab 100644
+--- a/dist/background-tasks/manager.d.ts
++++ b/dist/background-tasks/manager.d.ts
+@@ -31,6 +31,7 @@ export declare class BackgroundTaskManager {
+     private initPromise?;
+     private shutdownPromise?;
+     private shutdownDeadline?;
++    private shutdownPreservedTaskIds?;
+     constructor(config?: BackgroundTaskManagerConfig);
+     __registerMastra(mastra: Mastra): void;
+     /**
+@@ -152,6 +153,8 @@ export declare class BackgroundTaskManager {
+      */
+     shutdown(options?: {
+         deadline?: number;
++        /** Exact running resources whose executor is being safely detached by their owner. */
++        preserveRunningTaskIds?: readonly string[];
+     }): Promise<void>;
+     private dispatch;
+     /**
+diff --git a/dist/background-tasks-DnLo8J7v.js b/dist/background-tasks-DnLo8J7v.js
+index c0957cb678fc3d241c7cfd266108b816723bc9a7..a59ef81ae0a80f243e54a3154934ba29c2b64341 100644
+--- a/dist/background-tasks-DnLo8J7v.js
++++ b/dist/background-tasks-DnLo8J7v.js
+@@ -718,6 +718,7 @@ var BackgroundTaskManager = class {
+ 	shutdown(options) {
+ 		if (this.shutdownPromise) return this.shutdownPromise;
+ 		this.shuttingDown = true;
++		this.shutdownPreservedTaskIds = new Set(options?.preserveRunningTaskIds ?? []);
+ 		this.shutdownDeadline = options?.deadline ?? Date.now() + SHUTDOWN_GRACE_PERIOD_MS;
+ 		this.shutdownPromise = this.#shutdown();
+ 		return this.shutdownPromise;
+@@ -800,7 +801,7 @@ var BackgroundTaskManager = class {
+ 	}
+ 	async #cancelTaskForShutdown(taskId) {
+ 		const task = await (await this.getStorage()).getTask(taskId);
+-		if (task?.status === "running" && task.maxRetries > 0) return;
++		if (task?.status === "running" && (task.maxRetries > 0 || task.ownerId === this.workerId && this.shutdownPreservedTaskIds?.has(taskId))) return;
+ 		await this.cancel(taskId);
+ 	}
+ 	#abortActiveControllers() {
+diff --git a/dist/background-tasks-uTaVmM_E.cjs b/dist/background-tasks-uTaVmM_E.cjs
+index f1d6a49353e05deedf60709f1852aa3c245e94b0..d965e90d78d7c92befbe053affcfd59e1c62a520 100644
+--- a/dist/background-tasks-uTaVmM_E.cjs
++++ b/dist/background-tasks-uTaVmM_E.cjs
+@@ -718,6 +718,7 @@ var BackgroundTaskManager = class {
+ 	shutdown(options) {
+ 		if (this.shutdownPromise) return this.shutdownPromise;
+ 		this.shuttingDown = true;
++		this.shutdownPreservedTaskIds = new Set(options?.preserveRunningTaskIds ?? []);
+ 		this.shutdownDeadline = options?.deadline ?? Date.now() + SHUTDOWN_GRACE_PERIOD_MS;
+ 		this.shutdownPromise = this.#shutdown();
+ 		return this.shutdownPromise;
+@@ -800,7 +801,7 @@ var BackgroundTaskManager = class {
+ 	}
+ 	async #cancelTaskForShutdown(taskId) {
+ 		const task = await (await this.getStorage()).getTask(taskId);
+-		if (task?.status === "running" && task.maxRetries > 0) return;
++		if (task?.status === "running" && (task.maxRetries > 0 || task.ownerId === this.workerId && this.shutdownPreservedTaskIds?.has(taskId))) return;
+ 		await this.cancel(taskId);
+ 	}
+ 	#abortActiveControllers() {
+diff --git a/dist/message-list-DTbwwKD5.cjs b/dist/message-list-DTbwwKD5.cjs
+index a10e015f8c9cd278cce1c97f8fc22dd33a218ec8..f1fce91e035778034410eb731bc7ec038358bad5 100644
+--- a/dist/message-list-DTbwwKD5.cjs
++++ b/dist/message-list-DTbwwKD5.cjs
+@@ -369,7 +369,11 @@ function dropCrossProviderExecutedParts(messages, dbMessages, targetProvider, lo
+ * @see https://github.com/mastra-ai/mastra/issues/11376 - Anthropic models fail with empty object tool input
+ */
+ function ensureAnthropicCompatibleMessages(messages, dbMessages) {
+-	return messages.map((msg) => enrichToolResultsWithInput(msg, dbMessages));
++	const calls = new Map();
++	return messages.map((message) => {
++		if (message.role === "assistant" && Array.isArray(message.content)) for (const part of message.content) if (part.type === "tool-call") calls.set(part.toolCallId, { toolName: part.toolName, input: part.input });
++		return enrichToolResultsWithInput(message, dbMessages, calls);
++	});
+ }
+ /**
+ * Tool call ids in the assistant message at `index` that already have a matching tool_result,
+@@ -486,14 +490,14 @@ function pairOrphanedToolCalls(messages) {
+ /**
+ * Enriches a single message's tool-result parts with input field
+ */
+-function enrichToolResultsWithInput(message, dbMessages) {
++function enrichToolResultsWithInput(message, dbMessages, calls) {
+ 	if (message.role !== "tool" || !Array.isArray(message.content)) return message;
+ 	return {
+ 		...message,
+ 		content: message.content.map((part) => {
+ 			if (part.type === "tool-result") return {
+ 				...part,
+-				input: findToolCallArgs(dbMessages, part.toolCallId)
++				input: calls?.get(part.toolCallId)?.toolName === part.toolName ? calls.get(part.toolCallId).input : findToolCallArgs(dbMessages, part.toolCallId)
+ 			};
+ 			return part;
+ 		})
+diff --git a/dist/message-list-DUIXXRZ7.js b/dist/message-list-DUIXXRZ7.js
+index f1ea98ee597aa702bbf55fb68330301bb0ce88dd..fdb3f99e9d5c1701f0c42869fc2d0fdbe8700410 100644
+--- a/dist/message-list-DUIXXRZ7.js
++++ b/dist/message-list-DUIXXRZ7.js
+@@ -369,7 +369,11 @@ function dropCrossProviderExecutedParts(messages, dbMessages, targetProvider, lo
+ * @see https://github.com/mastra-ai/mastra/issues/11376 - Anthropic models fail with empty object tool input
+ */
+ function ensureAnthropicCompatibleMessages(messages, dbMessages) {
+-	return messages.map((msg) => enrichToolResultsWithInput(msg, dbMessages));
++	const calls = new Map();
++	return messages.map((message) => {
++		if (message.role === "assistant" && Array.isArray(message.content)) for (const part of message.content) if (part.type === "tool-call") calls.set(part.toolCallId, { toolName: part.toolName, input: part.input });
++		return enrichToolResultsWithInput(message, dbMessages, calls);
++	});
+ }
+ /**
+ * Tool call ids in the assistant message at `index` that already have a matching tool_result,
+@@ -486,14 +490,14 @@ function pairOrphanedToolCalls(messages) {
+ /**
+ * Enriches a single message's tool-result parts with input field
+ */
+-function enrichToolResultsWithInput(message, dbMessages) {
++function enrichToolResultsWithInput(message, dbMessages, calls) {
+ 	if (message.role !== "tool" || !Array.isArray(message.content)) return message;
+ 	return {
+ 		...message,
+ 		content: message.content.map((part) => {
+ 			if (part.type === "tool-result") return {
+ 				...part,
+-				input: findToolCallArgs(dbMessages, part.toolCallId)
++				input: calls?.get(part.toolCallId)?.toolName === part.toolName ? calls.get(part.toolCallId).input : findToolCallArgs(dbMessages, part.toolCallId)
+ 			};
+ 			return part;
+ 		})
+diff --git a/dist/tools/types.d.ts b/dist/tools/types.d.ts
+index 91241ed1ccf80ceca7e06896aa39a7a9d732f13f..41d0b65222782b1b0f8da836b9a5b911de573d05 100644
+--- a/dist/tools/types.d.ts
++++ b/dist/tools/types.d.ts
+@@ -172,6 +172,8 @@ export declare const noopObserve: ToolObserve;
+ export interface AgentToolExecutionContext<TSuspend, TResume> {
+     agentId: string;
+     toolCallId: string;
++    /** Stable native assistant message owning this invocation. */
++    messageId?: string;
+     messages: any[];
+     /**
+      * Reads the current in-memory conversation, including remembered messages and this run's responses.
+@@ -282,6 +284,8 @@ export interface MCPToolExecutionContext {
+  * - Returns: Results back to AI SDK
+  */
+ export type MastraToolInvocationOptions = ToolInvocationOptions & Partial<ObservabilityContext> & {
++    /** Stable native assistant message owning this invocation. */
++    messageId?: string;
+     suspend?: (suspendPayload: any, suspendOptions?: SuspendOptions) => Promise<any>;
+     resumeData?: any;
+     /** Framework-resolved delegated run ID recovered from persisted suspension state. */
+diff --git a/dist/utils-B2txJixJ.cjs b/dist/utils-B2txJixJ.cjs
+index ffee4972866733b11e5dd33d0529cd66a3feeeea..44b362ec104e7b9508c275c74ff3a87180dbf75e 100644
+--- a/dist/utils-B2txJixJ.cjs
++++ b/dist/utils-B2txJixJ.cjs
+@@ -908,6 +908,7 @@ var CoreToolBuilder = class extends require_base.MastraBase {
+ 							agent: {
+ 								agentId: options.agentId || "",
+ 								toolCallId: execOptions.toolCallId || "",
++								messageId: execOptions.messageId,
+ 								messages: execOptions.messages || [],
+ 								getMessages: execOptions.getMessages,
+ 								suspend,
+diff --git a/dist/utils-PnhSOMoG.js b/dist/utils-PnhSOMoG.js
+index f07a7f3520020bfe72d6751553a33b0fd50dc8db..dde880f3eeca573adf7e563ea65b3f0872758fbb 100644
+--- a/dist/utils-PnhSOMoG.js
++++ b/dist/utils-PnhSOMoG.js
+@@ -908,6 +908,7 @@ var CoreToolBuilder = class extends MastraBase {
+ 							agent: {
+ 								agentId: options.agentId || "",
+ 								toolCallId: execOptions.toolCallId || "",
++								messageId: execOptions.messageId,
+ 								messages: execOptions.messages || [],
+ 								getMessages: execOptions.getMessages,
+ 								suspend,
+diff --git a/dist/workspace/sandbox/process-manager/process-handle.d.ts b/dist/workspace/sandbox/process-manager/process-handle.d.ts
+index f0b3f45111809647b3c1d1d0f49332061abf06b8..7d9a47e3fe60bad73d58e3078ac8d825693648c2 100644
+--- a/dist/workspace/sandbox/process-manager/process-handle.d.ts
++++ b/dist/workspace/sandbox/process-manager/process-handle.d.ts
+@@ -118,6 +118,8 @@ export declare abstract class ProcessHandle {
+     command?: string;
+     /** Kill the running process (SIGKILL). Returns true if killed, false if not found. */
+     abstract kill(): Promise<boolean>;
++    /** Terminate only the originally owned child handle; never resolve or kill a numeric PID. */
++    killOwnedProcess?(): Promise<boolean>;
+     /** Send data to the process's stdin */
+     abstract sendStdin(data: string): Promise<void>;
+     /**
+diff --git a/dist/workspace/sandbox/process-manager/types.d.ts b/dist/workspace/sandbox/process-manager/types.d.ts
+index 21ae58d722e36a6cb358f4fbd0990321718f4595..d7a43e7a7afb89010a4787cce42ff85188cfd7a2 100644
+--- a/dist/workspace/sandbox/process-manager/types.d.ts
++++ b/dist/workspace/sandbox/process-manager/types.d.ts
+@@ -6,6 +6,10 @@
+ import type { CommandOptions } from '../types.js';
+ /** Options for spawning a process. */
+ export interface SpawnProcessOptions extends CommandOptions {
++    /** Local provider: original stdout bytes before text decoding. The chunk is an independent copy. */
++    onStdoutBytes?: (data: Uint8Array) => void;
++    /** Local provider: original stderr bytes before text decoding. The chunk is an independent copy. */
++    onStderrBytes?: (data: Uint8Array) => void;
+     /** @internal Original argv before shell quoting; providers may ignore this hint. */
+     originalInvocation?: {
+         command: string;
+diff --git a/dist/workspace/tools/tools.d.ts b/dist/workspace/tools/tools.d.ts
+index 428a7de0b579b90802a996cce060081290288baf..7e6ea67e6cd7d25aabe4a5b4a393920679d1fd2e 100644
+--- a/dist/workspace/tools/tools.d.ts
++++ b/dist/workspace/tools/tools.d.ts
+@@ -15,6 +15,7 @@ import type { WorkspaceToolsConfig, DynamicToolConfigValue, ToolConfigContext, T
+ export type { WorkspaceToolConfig, WorkspaceToolsConfig, ExecuteCommandToolConfig, BackgroundProcessConfig, BackgroundProcessMeta, BackgroundProcessExitMeta, ToolConfigContext, ToolConfigWithArgsContext, DynamicToolConfigValue, WorkspaceToolHookContext, WorkspaceToolBeforeHookResult, WorkspaceToolAfterHookContext, WorkspaceToolHooks, } from './types.js';
+ /** Resolved tool config with `enabled` as a boolean and execution-time values as raw config. */
+ export interface ResolvedToolConfig {
++    transformTool?: import('./types.js').WorkspaceToolConfig['transformTool'];
+     enabled: boolean;
+     requireApproval: DynamicToolConfigValue<ToolConfigWithArgsContext>;
+     background?: ToolBackgroundConfig;
+diff --git a/dist/workspace/tools/types.d.ts b/dist/workspace/tools/types.d.ts
+index 6b41680a14133ec2ec14fe23fc6eb702f5382714..d71dd4a3fd8ccca3782624a60230d177d5439d0f 100644
+--- a/dist/workspace/tools/types.d.ts
++++ b/dist/workspace/tools/types.d.ts
+@@ -7,6 +7,7 @@
+  * and do not import any Node.js dependencies.
+  */
+ import type { ToolBackgroundConfig } from '../../background-tasks/types.js';
++import type { Tool } from '../../tools/tool.js';
+ import type { WorkspaceToolName, WORKSPACE_TOOLS } from '../constants/index.js';
+ /**
+  * Context available to dynamic tool config functions evaluated at tool-listing time.
+@@ -75,6 +76,8 @@ export interface WorkspaceToolHooks {
+  * All fields are optional; unspecified fields inherit from top-level defaults.
+  */
+ export interface WorkspaceToolConfig {
++    /** Trusted host replacement before the native permission, read tracking, hook and lock wrappers. */
++    transformTool?: (tool: Tool<any, any, any, any, any>) => Tool<any, any, any, any, any>;
+     /**
+      * Whether the tool is enabled (default: true).
+      * When a function, evaluated at tool-listing time with requestContext and workspace.
+diff --git a/dist/workspace-D_oMrlvT.js b/dist/workspace-D_oMrlvT.js
+index 9ab95fcb7b217ed0223914846bafbfee2c79517a..adfebbcf1d37929063b07e07cd2b5b782139950f 100644
+--- a/dist/workspace-D_oMrlvT.js
++++ b/dist/workspace-D_oMrlvT.js
+@@ -3428,11 +3428,13 @@ var LocalProcessHandle = class extends ProcessHandle {
+ 			});
+ 		});
+ 		subprocess.stdout?.on("data", (data) => {
++			options?.onStdoutBytes?.(Buffer.from(data));
+ 			const decoded = stdoutDecoder.decode(data, { stream: true });
+ 			if (decoded) this.emitStdout(decoded);
+ 		});
+ 		subprocess.stdout?.on("end", flushStdoutDecoder);
+ 		subprocess.stderr?.on("data", (data) => {
++			options?.onStderrBytes?.(Buffer.from(data));
+ 			const decoded = stderrDecoder.decode(data, { stream: true });
+ 			if (decoded) this.emitStderr(decoded);
+ 		});
+@@ -3446,6 +3448,10 @@ var LocalProcessHandle = class extends ProcessHandle {
+ 		await killProcessTree(this._numericPid, this.subprocess, "SIGKILL");
+ 		return true;
+ 	}
++	async killOwnedProcess() {
++		if (this.exitCode !== void 0 || this.subprocess.exitCode !== null || this.subprocess.signalCode !== null) return false;
++		return this.subprocess.kill("SIGKILL");
++	}
+ 	async sendStdin(data) {
+ 		if (this.exitCode !== void 0) throw new Error(`Process ${this.pid} has already exited with code ${this.exitCode}`);
+ 		if (!this.subprocess.stdin) throw new Error(`Process ${this.pid} does not have stdin available`);
+@@ -11258,6 +11264,7 @@ async function resolveToolConfig(toolsConfig, toolName, context) {
+ 	let requireReadBeforeWrite;
+ 	let maxOutputTokens;
+ 	let name;
++	let transformTool;
+ 	const hooks = toolsConfig?.hooks;
+ 	if (toolsConfig) {
+ 		if (toolsConfig.enabled !== void 0) enabled = toolsConfig.enabled;
+@@ -11270,6 +11277,7 @@ async function resolveToolConfig(toolsConfig, toolName, context) {
+ 			if (perToolConfig.requireReadBeforeWrite !== void 0) requireReadBeforeWrite = perToolConfig.requireReadBeforeWrite;
+ 			if (perToolConfig.maxOutputTokens !== void 0) maxOutputTokens = perToolConfig.maxOutputTokens;
+ 			if (perToolConfig.name !== void 0) name = perToolConfig.name;
++			if (perToolConfig.transformTool !== void 0) transformTool = perToolConfig.transformTool;
+ 		}
+ 	}
+ 	return {
+@@ -11279,6 +11287,7 @@ async function resolveToolConfig(toolsConfig, toolName, context) {
+ 		requireReadBeforeWrite,
+ 		maxOutputTokens,
+ 		name,
++		transformTool,
+ 		hooks
+ 	};
+ }
+@@ -11481,7 +11490,9 @@ async function createWorkspaceTools(workspace, configContext, options) {
+ 		if (!config.enabled) return;
+ 		if (opts?.requireWrite && isReadOnly) return;
+ 		if (opts?.isAvailable && !opts.isAvailable()) return;
+-		const tool = createTool();
++		const original = createTool();
++		const tool = config.transformTool ? config.transformTool(original) : original;
++		if (!tool || tool.id !== original.id) throw new Error("Workspace tool replacement must preserve the built-in tool id");
+ 		let wrapped;
+ 		if (typeof config.requireApproval === "function") {
+ 			const approvalFn = config.requireApproval;
+diff --git a/dist/workspace-XCMimg8W.cjs b/dist/workspace-XCMimg8W.cjs
+index 436beb2e77fc36cf4c9cc31320680db33f550d9e..6ef1cdd0c1a85417147bb081ebf97b36e4798c75 100644
+--- a/dist/workspace-XCMimg8W.cjs
++++ b/dist/workspace-XCMimg8W.cjs
+@@ -3433,11 +3433,13 @@ var LocalProcessHandle = class extends ProcessHandle {
+ 			});
+ 		});
+ 		subprocess.stdout?.on("data", (data) => {
++			options?.onStdoutBytes?.(Buffer.from(data));
+ 			const decoded = stdoutDecoder.decode(data, { stream: true });
+ 			if (decoded) this.emitStdout(decoded);
+ 		});
+ 		subprocess.stdout?.on("end", flushStdoutDecoder);
+ 		subprocess.stderr?.on("data", (data) => {
++			options?.onStderrBytes?.(Buffer.from(data));
+ 			const decoded = stderrDecoder.decode(data, { stream: true });
+ 			if (decoded) this.emitStderr(decoded);
+ 		});
+@@ -3451,6 +3453,10 @@ var LocalProcessHandle = class extends ProcessHandle {
+ 		await killProcessTree(this._numericPid, this.subprocess, "SIGKILL");
+ 		return true;
+ 	}
++	async killOwnedProcess() {
++		if (this.exitCode !== void 0 || this.subprocess.exitCode !== null || this.subprocess.signalCode !== null) return false;
++		return this.subprocess.kill("SIGKILL");
++	}
+ 	async sendStdin(data) {
+ 		if (this.exitCode !== void 0) throw new Error(`Process ${this.pid} has already exited with code ${this.exitCode}`);
+ 		if (!this.subprocess.stdin) throw new Error(`Process ${this.pid} does not have stdin available`);
+@@ -11263,6 +11269,7 @@ async function resolveToolConfig(toolsConfig, toolName, context) {
+ 	let requireReadBeforeWrite;
+ 	let maxOutputTokens;
+ 	let name;
++	let transformTool;
+ 	const hooks = toolsConfig?.hooks;
+ 	if (toolsConfig) {
+ 		if (toolsConfig.enabled !== void 0) enabled = toolsConfig.enabled;
+@@ -11275,6 +11282,7 @@ async function resolveToolConfig(toolsConfig, toolName, context) {
+ 			if (perToolConfig.requireReadBeforeWrite !== void 0) requireReadBeforeWrite = perToolConfig.requireReadBeforeWrite;
+ 			if (perToolConfig.maxOutputTokens !== void 0) maxOutputTokens = perToolConfig.maxOutputTokens;
+ 			if (perToolConfig.name !== void 0) name = perToolConfig.name;
++			if (perToolConfig.transformTool !== void 0) transformTool = perToolConfig.transformTool;
+ 		}
+ 	}
+ 	return {
+@@ -11284,6 +11292,7 @@ async function resolveToolConfig(toolsConfig, toolName, context) {
+ 		requireReadBeforeWrite,
+ 		maxOutputTokens,
+ 		name,
++		transformTool,
+ 		hooks
+ 	};
+ }
+@@ -11486,7 +11495,9 @@ async function createWorkspaceTools(workspace, configContext, options) {
+ 		if (!config.enabled) return;
+ 		if (opts?.requireWrite && isReadOnly) return;
+ 		if (opts?.isAvailable && !opts.isAvailable()) return;
+-		const tool = createTool();
++		const original = createTool();
++		const tool = config.transformTool ? config.transformTool(original) : original;
++		if (!tool || tool.id !== original.id) throw new Error("Workspace tool replacement must preserve the built-in tool id");
+ 		let wrapped;
+ 		if (typeof config.requireApproval === "function") {
+ 			const approvalFn = config.requireApproval;

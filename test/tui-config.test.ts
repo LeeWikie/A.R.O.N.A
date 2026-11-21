@@ -30,7 +30,7 @@ test('configuration forms preserve existing fields and edit typed values', async
     assert.deepEqual(calls.find(x => x.route === '/configuration/model')?.body, { ...profile, thinking: { low: { reasoningEffort: 'low' }, high: { reasoningEffort: 'high' } } });
     choices = ['provider-model', 'defaultThinkingLevel', 'high']; await target.editModel();
     assert.deepEqual(calls.filter(x => x.route === '/configuration/model').at(-1)?.body, { ...providerProfile, defaultThinkingLevel: 'high' });
-    assert.deepEqual(menus.filter(menu => menu.title.startsWith('默认思考模式')).at(-1)?.values, ['unset', 'low', 'high']);
+    assert.deepEqual(menus.filter(menu => menu.title.startsWith('默认思考模式')).at(-1)?.values, ['unset', 'minimal', 'low', 'high']);
     choices = ['provider-model', 'defaultThinkingLevel', 'unset']; await target.editModel();
     const { defaultThinkingLevel: _, ...withoutDefault } = providerProfile;
     assert.deepEqual(calls.filter(x => x.route === '/configuration/model').at(-1)?.body, withoutDefault);

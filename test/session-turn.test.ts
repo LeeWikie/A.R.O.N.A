@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';import test from 'node:test';
+import {MessageList,type MastraDBMessage} from '@mastra/core/agent/message-list';
+import {completeNativeToolRoundTrips} from '../src/session-turn.js';
+function message(id:string,state:'call'|'result',name='read',args:unknown={path:'中文.txt'}):MastraDBMessage{return {id,threadId:'main',resourceId:'local',role:'assistant',type:'text',createdAt:new Date(1),content:{format:2,parts:[{type:'text',text:'ORIGINAL_ROW_'+id},{type:'tool-invocation',toolInvocation:{state,toolCallId:'call-id',toolName:name,args,...(state==='result'?{result:{content:'ACTUAL_RESULT_ONCE'}}:{})}}]}} as MastraDBMessage;}
+test('real native call snapshots normalize only after a matching real result and preserve all other raw state',async()=>{
+ const before=message('call','call'),result=message('result','result'),original=structuredClone([before,result]);const complete=await completeNativeToolRoundTrips([before,result]);
+ assert.deepEqual([before,result],original);assert.deepEqual(complete[0],{...before,content:{...before.content,parts:[before.content.parts[0]!]}});assert.deepEqual(complete[1],result);
+ const list=new MessageList({threadId:'main',resourceId:'local',filterIncompleteToolCalls:false});list.add(complete,'memory');const prompt=JSON.stringify(await list.get.all.aiV5.llmPrompt());assert.equal(prompt.includes('"status":"pending"'),false);assert.equal(prompt.split('ACTUAL_RESULT_ONCE').length-1,1);assert.ok(prompt.includes('ORIGINAL_ROW_call'));
+});
+test('unfinished, repeated and contradictory native snapshots cannot pass a complete-turn boundary',async()=>{
+ await assert.rejects(completeNativeToolRoundTrips([message('call','call')]),/branch_requires_complete_turn/);
+ await assert.rejects(completeNativeToolRoundTrips([message('call','call'),message('again','call'),message('result','result')]),/branch_requires_complete_turn/);
+ await assert.rejects(completeNativeToolRoundTrips([message('call','call'),message('result','result','different')]),/branch_requires_complete_turn/);
+ await assert.rejects(completeNativeToolRoundTrips([message('call','call'),message('result','result','read',{path:'other'})]),/branch_requires_complete_turn/);
+ const duplicate=message('result','result');duplicate.content.parts.push(duplicate.content.parts[1]!);await assert.rejects(completeNativeToolRoundTrips([duplicate]),/branch_requires_complete_turn/);
+});
+test('request-only orphan recovery uses an explicit native error and never mutates or completes the stored call',async()=>{
+ const call=message('call','call'),user={id:'later',threadId:'main',resourceId:'local',role:'user' as const,type:'text' as const,createdAt:new Date(2),content:{format:2 as const,parts:[{type:'text' as const,text:'A real later input'}]}};
+ const original=structuredClone([call,user]);const normalized=await completeNativeToolRoundTrips([call,user],{incomplete:'error'});assert.deepEqual([call,user],original);const part=normalized[0]!.content.parts.find(part=>part.type==='tool-invocation');assert.ok(part&&part.type==='tool-invocation');assert.equal(part.toolInvocation.state,'output-error');assert.equal(part.toolInvocation.errorText,'No result provided');
+ const list=new MessageList({threadId:'main',resourceId:'local',filterIncompleteToolCalls:false});list.add(normalized,'memory');const prompt=JSON.stringify(await list.get.all.aiV5.llmPrompt());assert.equal(prompt.includes('"status":"pending"'),false);assert.equal(prompt.split('No result provided').length-1,1);assert.equal(prompt.includes('ACTUAL_RESULT_ONCE'),false);await assert.rejects(completeNativeToolRoundTrips([call,user]),/branch_requires_complete_turn/);
+});
+test('completion carries original call signatures into the actual result lane without dropping text or raw metadata',async()=>{
+ const call=message('call','call'),result=message('result','result');Object.assign(call.content.parts[1]!,{providerMetadata:{pi:{thoughtSignature:'original-signature'}}});Object.assign(result.content.parts[1]!,{providerMetadata:{pi:{isError:false}}});
+ const normalized=await completeNativeToolRoundTrips([call,result]),metadata=(normalized[1]!.content.parts[1] as {providerMetadata?:{pi?:Record<string,unknown>}}).providerMetadata;assert.equal(metadata?.pi?.thoughtSignature,'original-signature');assert.equal(metadata?.pi?.isError,false);assert.ok(call.content.parts[1]!.type==='tool-invocation');assert.equal(call.content.parts.length,2);assert.equal(result.content.parts.length,2);
+ Object.assign(result.content.parts[1]!,{providerMetadata:{pi:{thoughtSignature:'contradictory-signature'}}});await assert.rejects(completeNativeToolRoundTrips([call,result]),/branch_requires_complete_turn/);
+});
+test('the real SDK legacy mirror cannot recreate a removed call or a pending placeholder after serialization',async()=>{
+ const list=new MessageList({threadId:'main',resourceId:'local',filterIncompleteToolCalls:false});list.add([{role:'assistant',content:[{type:'tool-call',toolCallId:'mirror-call',toolName:'read',input:{path:'source'}}]},{role:'tool',content:[{type:'tool-result',toolCallId:'mirror-call',toolName:'read',output:{type:'json',value:{text:'MIRROR_ACTUAL_RESULT'}}}]}],'memory');
+ const raw=list.get.all.db();assert.ok(raw[0]!.content.toolInvocations?.length);const original=structuredClone(raw),normalized=await completeNativeToolRoundTrips(raw),state=list.serialize();state.messages=normalized.map(row=>({...row,createdAt:row.createdAt.toISOString()}));const restored=new MessageList({threadId:'main',resourceId:'local',filterIncompleteToolCalls:false});restored.deserialize(state);const prompt=JSON.stringify(await restored.get.all.aiV5.llmPrompt());assert.equal(prompt.includes('"status":"pending"'),false);assert.equal(prompt.split('MIRROR_ACTUAL_RESULT').length-1,1);assert.equal(normalized[0]!.content.toolInvocations?.length,0);assert.deepEqual(raw,original);
+ const orphan=raw.slice(0,1),errors=await completeNativeToolRoundTrips(orphan,{incomplete:'error'});state.messages=errors.map(row=>({...row,createdAt:row.createdAt.toISOString()}));restored.deserialize(state);const errorPrompt=JSON.stringify(await restored.get.all.aiV5.llmPrompt());assert.equal(errorPrompt.includes('"status":"pending"'),false);assert.equal(errorPrompt.split('No result provided').length-1,1);assert.deepEqual(raw,original);
+});

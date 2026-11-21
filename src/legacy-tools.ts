@@ -2,21 +2,30 @@ import { z } from 'zod';
 import { createTool } from '@mastra/core/tools';
 import type { Core } from './core.js';
 import { createScheduleSchema, updateScheduleSchema } from './schedules.js';
-const outputSources = z.array(z.string().uuid()).min(1).max(64);
+import{acceptedSourceIds}from'./accepted-sources.js';
+const outputSources = acceptedSourceIds;
 const outputText = z.string().min(1).max(1_000_000);
-export function legacyTools(core: Core) {
-    const authorization = { signalIds: outputSources };
-    const tools = {
+export function messageDeliveryTools(core: Core) {
+  return {
       emit_message: createTool({
         id: 'emit_message', description: 'Send a complete message to the destination of its source signals.',
         inputSchema: z.object({ signalIds: outputSources, text: outputText }),
         execute: async (input, context) => core.publish('message', input.signalIds, input.text, context),
       }),
+  };
+}
+export function artifactDeliveryTools(core: Core) {
+  return {
       save_artifact: createTool({
         id: 'save_artifact', description: 'Save an independent Markdown artifact for its source signals.',
         inputSchema: z.object({ signalIds: outputSources, title: z.string().min(1).max(200), markdown: outputText }),
         execute: async (input, context) => core.publish('artifact', input.signalIds, input.markdown, context, input.title),
       }),
+  };
+}
+export function scheduleManagementTools(core: Core) {
+    const authorization = { signalIds: outputSources };
+    return {
       schedule_list: createTool({
         id: 'schedule_list', description: 'Read current time, default timezone and saved duties before arranging or changing a schedule.',
         inputSchema: z.object(authorization),
@@ -66,14 +75,16 @@ export function legacyTools(core: Core) {
           return { occurrences, nextOffset: input.offset + occurrences.length };
         },
       }),
+  };
+}
+export function occurrenceReportTools(core: Core) {
+  return {
       report_scheduled_task: createTool({
         id: 'report_scheduled_task', description: 'Report one scheduled occurrence after processing it. Does not publish a message or artifact.',
         inputSchema: z.object({ occurrenceId: z.string().uuid(), status: z.enum(['succeeded', 'failed']), summary: z.string().min(1).max(4000) }),
         execute: async (input, context) => {
-          const auth = core.activeTool(context);
-          return core.schedules.report(input.occurrenceId, auth.runId, input.status, input.summary, auth.key);
+          return core.reportLegacyOccurrence(input.occurrenceId, input.status, input.summary, context);
         },
       }),
     };
-  return tools;
 }

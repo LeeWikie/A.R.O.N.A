@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
+import test from 'node:test';
+import {SessionArtifactStore} from '../src/session-artifacts.js';
+import {McpResultStore,type McpResultBinding} from '../src/tools/mcp-results.js';
+const binding:McpResultBinding={contextId:'worker',workspaceId:'project',taskId:'task',runId:'run',attempt:1,sourceSignalIds:['source'],toolCallId:'remote-call',nativeMessageId:'native-step',serverId:'remote',toolName:'ext_remote_source',capabilityKey:'a'.repeat(64),proof:'b'.repeat(64)};
+const metadata={name:'Original MCP response',mediaType:'application/json',representation:'mcp-call-tool-result'as const,source:{serverId:binding.serverId,toolName:binding.toolName}};
+const digest=(value:Uint8Array)=>createHash('sha256').update(value).digest('hex');
+
+test('complete MCP results use the central immutable byte store while only the sealed metadata carries original source identity',async()=>{
+ const db=new DatabaseSync(':memory:'),cas=new SessionArtifactStore(db),store=new McpResultStore(db,'synthetic-mcp-secret',cas),body=Buffer.from(JSON.stringify({version:1,packetReceived:true,validated:true,result:{content:[{type:'text',text:'中'.repeat(40000)}],structuredContent:null,_meta:{original:'PRIVATE_CLIENT_METADATA'}}}));
+ try{const ref=await store.save(body,metadata,binding);assert.equal(ref.bytes,body.length);assert.equal(ref.sha256,digest(body));assert.equal(Number(db.prepare('SELECT count(*) n FROM session_artifact_bindings').get()!.n),0);assert.deepEqual(store.describe(ref.id).binding,binding);await assert.rejects(store.read(ref.id),/mcp_result_private_metadata/);const modelBytes=Buffer.from('中'.repeat(40000)),visible=await store.save(modelBytes,{...metadata,name:'Model-visible source',mediaType:'text/plain',representation:'mcp-model-text',originalResultId:ref.id},binding);const text=await store.read(visible.id);assert.equal(text.representation,'utf8-source-text');assert.equal('requiresByteRead'in text&&text.requiresByteRead,true);
+  const chunks:Buffer[]=[];let offset=0;do{const page=await store.read(visible.id,{encoding:'base64',byteOffset:offset,maxBytes:32768});assert.equal(page.representation,'base64');assert.equal(page.authority,'external-mcp-data');chunks.push(Buffer.from(page.content,'base64'));if(!('nextByteOffset'in page)||page.nextByteOffset===null)break;offset=page.nextByteOffset;}while(true);assert.deepEqual(Buffer.concat(chunks),modelBytes);
+  const snapshot=store.exportRetained(ref.id),retained:Uint8Array[]=[];for await(const value of snapshot.chunks())retained.push(value);assert.deepEqual(Buffer.concat(retained),body);assert.deepEqual(snapshot.metadata.origin,{contextId:'worker',runId:'run',taskId:'task'});assert.doesNotMatch(JSON.stringify(snapshot.metadata),/capabilityKey|sourceSignalIds|proof|secret|mac/);
+  await assert.rejects(store.save(Buffer.from('Forged model-facing text.'),{...metadata,name:'Complete model text',mediaType:'text/plain',representation:'mcp-model-text',originalResultId:ref.id},binding),/mcp_result_projection_changed/);await assert.rejects(store.save(Buffer.from('foreign text'),{...metadata,mediaType:'text/plain',representation:'mcp-model-text',originalResultId:ref.id},{...binding,contextId:'other'}),/mcp_result_source_changed/);assert.doesNotMatch((await store.read(visible.id,{encoding:'base64'})).content,/PRIVATE_CLIENT_METADATA/);
+ }finally{db.close();}
+});
+
+test('MCP result metadata or content tampering and cancellation never return a successful original',async()=>{
+ const db=new DatabaseSync(':memory:'),cas=new SessionArtifactStore(db),store=new McpResultStore(db,'synthetic-mcp-secret',cas);
+ try{const original=await store.save(Buffer.from(JSON.stringify({version:1,packetReceived:true,validated:true,result:{content:[{type:'text',text:'Original content'}]}})),metadata,binding),ref=await store.save(Buffer.from('Original content'),{...metadata,mediaType:'text/plain',representation:'mcp-model-text',originalResultId:original.id},binding),other=new McpResultStore(db,'another-secret',cas);assert.throws(()=>other.describe(ref.id),/mcp_result_changed/);await assert.rejects(store.read(ref.id,{offset:1},AbortSignal.abort()),/abort/i);
+  const row=db.prepare('SELECT body FROM mcp_result_records WHERE id=?').get(ref.id)!;db.prepare('UPDATE mcp_result_records SET body=? WHERE id=?').run(String(row.body).replace('Original MCP response','Changed MCP response'),ref.id);assert.throws(()=>store.describe(ref.id),/mcp_result_changed/);db.prepare('UPDATE mcp_result_records SET body=? WHERE id=?').run(String(row.body),ref.id);
+  db.prepare('UPDATE session_artifact_chunks SET content=?').run(Buffer.from('Modified content'));await assert.rejects(store.read(ref.id,{encoding:'base64'}),/session_artifact_changed/);
+ }finally{db.close();}
+});
+
+test('retained image lanes are verified against the original packet, and safe labels never authorize private metadata bytes',async()=>{
+ const db=new DatabaseSync(':memory:'),cas=new SessionArtifactStore(db),store=new McpResultStore(db,'synthetic-mcp-secret',cas),image=Buffer.from([0,1,2]),body=Buffer.from(JSON.stringify({version:1,packetReceived:true,validated:true,result:{content:[{type:'text',text:'Original public text'},{type:'image',data:image.toString('base64'),mimeType:'image/png'}],_meta:{private:'SYNTHETIC_PRIVATE_METADATA'}}}));
+ try{const raw=await store.save(body,metadata,binding),safe={...metadata,name:'Image lane',mediaType:'image/png',representation:'mcp-model-image'as const,originalResultId:raw.id,imageLane:1},ref=await store.save(image,safe,binding);assert.equal(ref.sha256,digest(image));const page=await store.read(ref.id,{encoding:'base64'});assert.deepEqual(Buffer.from(page.content,'base64'),image);const view=await store.read(ref.id);assert.equal(view.representation,'image');assert.deepEqual(Buffer.from(view.content,'base64'),image);await assert.rejects(store.read(ref.id,{encoding:'text'}),/mcp_result_requires_base64/);await assert.rejects(store.save(image,{...safe,imageLane:0},binding),/mcp_result_projection_changed/);await assert.rejects(store.save(body,{...metadata,mediaType:'text/plain',representation:'mcp-model-text',originalResultId:raw.id},binding),/mcp_result_projection_changed/);await assert.rejects(store.save(Buffer.from('Text'),{...metadata,mediaType:'text/plain',representation:'mcp-model-text'},binding),/mcp_result_original_required/);await assert.rejects(store.read(raw.id,{encoding:'base64'}),/mcp_result_private_metadata/);
+ }finally{db.close();}
+});

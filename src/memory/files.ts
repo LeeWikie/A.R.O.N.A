@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { createTool } from '@mastra/core/tools';
 import { AppError } from '../domain.js';
+import { decodeMemoryText, memoryFileResident, memoryFileTools } from './file-reader.js';
 
 export class MemoryFiles {
   private readonly realRoot: string;
@@ -50,21 +51,12 @@ export class MemoryFiles {
   resident() {
     return this.list().filter(x => x.path.endsWith('.md')).map(file => `<file path=${JSON.stringify(file.path)}>\n${fs.readFileSync(this.resolve(file.path), 'utf8')}\n</file>`).join('\n');
   }
+  reader() { return { list: () => this.list(), read: (relative: string) => decodeMemoryText(fs.readFileSync(this.resolve(relative))), readBytes: (relative: string) => fs.readFileSync(this.resolve(relative)) }; }
+  residentView(maxBytes?: number) { return memoryFileResident(this.reader(), maxBytes); }
   tools() {
     const p = z.string().min(1);
     return {
-      memory_list: createTool({ id: 'memory_list', description: 'List memory files recursively.', inputSchema: z.object({ path: z.string().default('') }), execute: async ({ path }) => this.list(path) }),
-      memory_read: createTool({ id: 'memory_read', description: 'Read memory; follow nextOffset to read remaining text.', inputSchema: z.object({ path: p, offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(48000).default(24000) }), execute: async ({ path, offset, limit }) => {
-        const content = fs.readFileSync(this.resolve(path), 'utf8'); return { path, content: content.slice(offset, offset + limit), totalCharacters: content.length, nextOffset: offset + limit < content.length ? offset + limit : null };
-      } }),
-      memory_search: createTool({ id: 'memory_search', description: 'Find literal text in Markdown. Reports whether further matches were omitted.', inputSchema: z.object({ query: p }), execute: async ({ query }) => {
-        const matches: { path: string; line: number; text: string }[] = []; let omitted = false;
-        for (const file of this.list().filter(x => x.path.endsWith('.md'))) for (const [i, text] of fs.readFileSync(this.resolve(file.path), 'utf8').split(/\r?\n/).entries()) {
-          if (!text.toLowerCase().includes(query.toLowerCase())) continue;
-          if (matches.length < 100) matches.push({ path: file.path, line: i + 1, text }); else omitted = true;
-        }
-        return { matches, omitted };
-      } }),
+      ...memoryFileTools(this.reader()),
       memory_write: createTool({ id: 'memory_write', description: 'Create or replace a memory file.', inputSchema: z.object({ path: p, content: z.string() }), execute: async ({ path, content }) => { this.write(path, content); return { written: true }; } }),
       memory_edit: createTool({ id: 'memory_edit', description: 'Replace one exact unique substring. Read before editing.', inputSchema: z.object({ path: p, oldText: p, newText: z.string() }), execute: async ({ path, oldText, newText }) => {
         const content = fs.readFileSync(this.resolve(path), 'utf8'); const index = content.indexOf(oldText);

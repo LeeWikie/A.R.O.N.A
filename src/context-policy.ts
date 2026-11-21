@@ -7,7 +7,7 @@ import {AppError} from './domain.js';
 export interface ContextCapacity {
   requestId:string;profileId:string;providerId:string;modelId:string;estimatedInputTokens:number;
   contextWindow:number|null;outputReserveTokens:number;safetyMarginTokens:number;availableInputTokens:number|null;
-  contextWindowSource:'provider-metadata'|'unknown';outputReserveIsHardLimit:false;estimator:'pi-ai-1.5.0';
+  contextWindowSource:'provider-metadata'|'unknown';outputReserveIsHardLimit:false;estimator:'pi-ai-1.5.0'|'pi-ai-1.5.1';
   basis:'heuristic'|'reported-prefix-plus-estimate';estimateIsExact:false;imageEstimateIsExact:false;
   lastReportedInputTokens?:number;lastReportedOutputTokens?:number;overBudget:boolean;
   policy:'warn'|'block';blockedBeforeProvider:boolean;updatedAt:string;
@@ -28,7 +28,7 @@ export class ContextPolicy {
       const window=Number.isFinite(model.contextWindow)&&model.contextWindow>0?model.contextWindow:null;
       const reserve=Math.min(options.maxTokens??model.maxTokens,window?Math.max(1,Math.floor(window/4)):model.maxTokens);const margin=4096;
       const available=window===null?null:Math.max(0,window-reserve-margin);const over=available!==null&&estimate>available;
-      const value:ContextCapacity={requestId:randomUUID(),profileId,providerId:model.provider,modelId:model.id,estimatedInputTokens:estimate,contextWindow:window,outputReserveTokens:reserve,safetyMarginTokens:margin,availableInputTokens:available,contextWindowSource:window?'provider-metadata':'unknown',outputReserveIsHardLimit:false,estimator:'pi-ai-1.5.0',basis:matches?'reported-prefix-plus-estimate':'heuristic',estimateIsExact:false,imageEstimateIsExact:false,overBudget:over,policy,blockedBeforeProvider:over&&policy==='block',updatedAt:new Date().toISOString()};
+      const value:ContextCapacity={requestId:randomUUID(),profileId,providerId:model.provider,modelId:model.id,estimatedInputTokens:estimate,contextWindow:window,outputReserveTokens:reserve,safetyMarginTokens:margin,availableInputTokens:available,contextWindowSource:window?'provider-metadata':'unknown',outputReserveIsHardLimit:false,estimator:'pi-ai-1.5.1',basis:matches?'reported-prefix-plus-estimate':'heuristic',estimateIsExact:false,imageEstimateIsExact:false,overBudget:over,policy,blockedBeforeProvider:over&&policy==='block',updatedAt:new Date().toISOString()};
       this.store.setSetting(`context-capacity:${contextId}`,value);this.store.event({contextId,kind:'capacity_state',data:value});
       if(value.blockedBeforeProvider)throw new AppError('context_capacity_exceeded',409);
       return usage=>{

@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import {MastraLanguageModelV2Mock} from '@mastra/core/test-utils/llm-mock';
+import type {MastraDBMessage} from '@mastra/core/agent/message-list';
+import {Core} from '../src/core.js';
+import {recoverNativeToolResults,type NativeToolRecoveryEvent} from '../src/native-tool-recovery.js';
+import {until,removeTemp} from './helpers.js';
+
+for(const fails of [false,true])test(`native completed-tool recovery keeps the original call and actual ${fails?'error':'success'} result`,async()=>{
+ const directory=fs.mkdtempSync(path.join(os.tmpdir(),'arona-native-tool-recovery-'));let calls=0;
+ const model=new MastraLanguageModelV2Mock({doStream:async request=>{const work=request.tools?.some(tool=>tool.name==='task_report'),first=work&&calls++===0;return {stream:new ReadableStream({start(controller){controller.enqueue({type:'stream-start',warnings:[]});if(first)controller.enqueue({type:'tool-call',toolCallId:'native-tool-recovery',toolName:fails?'mastra_workspace_read_file':'mastra_workspace_write_file',input:JSON.stringify(fails?{path:'missing.txt'}:{path:'complete.txt',content:'SYNTHETIC_NATIVE_TOOL_RESULT\n'})});controller.enqueue({type:'finish',finishReason:first?'tool-calls':'stop',usage:{inputTokens:1,outputTokens:1,totalTokens:2}});controller.close();}})};}});
+ const core=await Core.open({dataDir:directory,model,memoryEnabled:false});
+ try{const task=await core.submitTask({title:'Preserve a native result',content:'Use the synthetic workspace tool.',grants:{write:true,execute:false,mcp:false}},'native-tool-recovery');await until(()=>core.runtime.task(task.id),value=>['unreported','failed'].includes(value.status));const runId=core.runtime.task(task.id).runIds.at(-1)!,events=core.runtime.events(task.contextId,0,1000).filter(event=>event.runId===runId) as NativeToolRecoveryEvent[],started=events.find(event=>event.kind==='message_start'&&(event.data as {message:MastraDBMessage}).message.role==='assistant')!;
+  const original=(started.data as {message:MastraDBMessage}).message;original.createdAt=new Date(original.createdAt);const before=JSON.stringify(original),actual=recoverNativeToolResults([original],events,task.contextId,runId);assert.equal(actual.completions.length,1);assert.equal(JSON.stringify(original),before,'source native data must remain unchanged');const part=actual.messages[0]!.content.parts.find(part=>part.type==='tool-invocation')!;assert.equal(part.type,'tool-invocation');if(part.type!=='tool-invocation')return;assert.equal(part.toolInvocation.isError??false,fails);assert.equal(part.toolInvocation.toolCallId,'native-tool-recovery');assert.equal(part.toolInvocation.toolName,fails?'mastra_workspace_read_file':'mastra_workspace_write_file');assert.ok('result'in part.toolInvocation);assert.equal(part.toolInvocation.state,'result');
+  for(const tamper of ['result','arguments','scope','duplicate','missing-end','source'] as const){const changed=structuredClone(events),source=structuredClone(original);if(tamper==='missing-end')changed.splice(changed.findIndex(event=>event.kind==='tool_end'),1);if(tamper==='duplicate'){const end=changed.find(event=>event.kind==='tool_end')!;changed.push({...end,seq:end.seq+1});}if(tamper==='scope')for(const event of changed)if(event.kind==='tool_end')event.contextId='foreign-context';if(tamper==='result'){const end=changed.find(event=>event.kind==='tool_end')!;(end.data as {result:unknown}).result={changed:true};}if(tamper==='arguments'){const start=changed.find(event=>event.kind==='tool_start')!;(start.data as {args:unknown}).args={path:'foreign.txt'};}if(tamper==='source'){const call=source.content.parts.find(part=>part.type==='tool-invocation')!;if(call.type==='tool-invocation')call.toolInvocation.args={path:'foreign.txt'};}assert.equal(recoverNativeToolResults([source],changed,task.contextId,runId).completions.length,0,tamper);}
+ }finally{await core.close();await removeTemp(directory);}
+});

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-test('ConPTY client and driver both exit naturally', { skip: process.platform !== 'win32' || process.env.SHITTIMCHEST_CONPTY_TEST !== '1', timeout: 20_000 }, async () => {
+test('terminal client supports paste, resize and credentials and exits naturally', { skip: process.platform === 'win32' && process.env.SHITTIMCHEST_CONPTY_TEST !== '1', timeout: 20_000 }, async () => {
   const completionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'arona-tui-fd-'));
   fs.writeFileSync(path.join(completionDir, 'needle-item.txt'), 'fixture');
   fs.mkdirSync(path.join(completionDir, '.private')); fs.writeFileSync(path.join(completionDir, '.private', 'needle-private.txt'), 'fixture');

@@ -22,8 +22,9 @@ test('native Signals merge active inputs and publish separate destinations', asy
     const first = await core.submitSignal(user);
     await until(() => prompts.length, n => n > 0);
     const event = await core.submitSignal({ id: randomUUID(), source: 'fixture', type: 'external-event', content: 'Synthetic background event' });
-    assert.equal(event.runId, first.runId);
-    assert.equal(event.action, 'deliver');
+    assert.notEqual(event.runId, first.runId);
+    assert.equal(event.action, 'wake');
+    assert.equal(core.runtime.context(core.store.getRun(event.runId!)!.contextId)?.role, 'work');
     const duplicate = await core.submitSignal(user);
     assert.equal(duplicate.nativeSignalId, first.nativeSignalId);
     const duplicateBatch = await Promise.all(Array.from({ length: 6 }, () => core.submitSignal(user)));
@@ -31,11 +32,13 @@ test('native Signals merge active inputs and publish separate destinations', asy
     release();
     const run = await finished(core, first.runId!);
     assert.equal(run?.status, 'succeeded');
-    assert.ok(prompts.slice(1).some(p => p.includes(event.id)), 'the later signal must reach a later model step');
+    assert.equal((await finished(core, event.runId!))?.status, 'succeeded');
+    assert.ok(prompts.some(p => p.includes(event.content)), 'the event business content must reach its executor');
     assert.ok(providerOptions.every(options => (options as { openai?: { store?: boolean } })?.openai?.store === false));
     const outputs = core.store.listOutputs({ after: 0 });
-    assert.deepEqual(outputs.map(o => o.kind), ['message', 'artifact']);
-    assert.deepEqual(outputs.map(o => o.signalIds), [[first.id], [event.id]]);
+    assert.equal(outputs.length, 2);
+    assert.deepEqual(core.store.outputsForSignal(first.id).map(o => o.kind), ['message']);
+    assert.deepEqual(core.store.outputsForSignal(event.id).map(o => o.kind), ['artifact']);
     assert.ok(outputs.every(o => !o.content.includes('Internal completion')));
     const history = await core.history('main', 0, 100);
     assert.ok(history.messages.length > 0);

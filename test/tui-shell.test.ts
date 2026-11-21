@@ -31,10 +31,21 @@ test('shell runner streams output, reports exit codes, cancels the process tree 
   assert.equal(cancelled.cancelled, true); assert.ok(Date.now() - started < 5000);
   const colored = await runShell("printf '\\033[31mred\\033[0m\\n'", { cwd: os.tmpdir(), signal: new AbortController().signal, onChunk: () => {} });
   assert.equal(colored.output, 'red', 'terminal control sequences are stripped');
+  const unicode = await runShell("printf '\\344'; sleep 0.02; printf '\\270\\255'", { cwd: os.tmpdir(), signal: new AbortController().signal, onChunk: () => {} });
+  assert.equal(unicode.output, '中', 'UTF-8 split between process chunks remains intact');
   const tail = truncateTail(Array.from({ length: 3000 }, (_, i) => `line ${i}`).join('\n'));
   assert.equal(tail.truncated, true); assert.ok(tail.content.endsWith('line 2999'));
-  assert.deepEqual(shellCommand('dir', { ComSpec: 'C:\\Windows\\cmd.exe' }, 'win32'), { shell: 'C:\\Windows\\cmd.exe', args: ['/d', '/s', '/c', 'dir'] });
+  const unicodeTail = truncateTail('中文内容🙂'.repeat(100), 17);
+  assert.equal(unicodeTail.truncated, true); assert.ok(Buffer.byteLength(unicodeTail.content) <= 17); assert.ok(!unicodeTail.content.includes('�'));
+  assert.deepEqual(shellCommand('dir', { ComSpec: 'C:\\Windows\\cmd.exe' }, 'win32'), { shell: 'C:\\Windows\\cmd.exe', args: ['/d', '/s', '/c', '"dir"'] });
   assert.equal(shellResultText('false', { output: '', exitCode: 1, cancelled: false, truncated: false }), 'Ran `false`\n(no output)\n\nCommand exited with code 1');
+});
+
+test('shell cancellation ends processes that ignore SIGTERM', { skip: process.platform === 'win32', timeout: 6000 }, async () => {
+  const controller = new AbortController();
+  const running = runShell("trap '' TERM; echo ready; while :; do sleep 1; done", { cwd: os.tmpdir(), signal: controller.signal,
+    onChunk: text => { if (text.includes('ready')) controller.abort(); } });
+  const result = await running; assert.equal(result.cancelled, true); assert.equal(result.exitCode, undefined);
 });
 
 test('! shares the result with the next message, !! does not, and nothing reaches the model by itself', { skip: process.platform === 'win32' }, async () => {
@@ -74,8 +85,8 @@ test('provider reasoning is projected as thinking, redacted, and restored with h
   try {
     const signal = await core.submitMessage({ content: 'hi' }); await finished(core, signal.runId!);
     const events = core.runtime.events('main', 0, 500).map(event => projectEvent(core, event)).filter(event => event?.kind === 'thinking');
-    assert.equal(events.length, 1);
-    assert.match((events[0]!.data as { delta: string }).delta, /weighing options with Bearer \[hidden\]/);
+    assert.ok(events.length > 0);
+    assert.match(events.map(event => (event!.data as { delta: string }).delta).join(''), /weighing options with Bearer \[hidden\]/);
     assert.deepEqual(contextThinking(core, 'main').map(row => row.runId), [signal.runId]);
     assert.ok(snapshot(core, 'main').thinking?.[0]?.text.includes('weighing options'));
 

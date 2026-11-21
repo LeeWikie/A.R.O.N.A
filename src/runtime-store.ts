@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { AppError, contextIdSchema } from './domain.js';
+import { PublicThinkingProjection } from './public-thinking.js';
+import { PublicReplyProjection } from './public-replies.js';
+import { SnapshotStorage } from './storage/snapshots.js';
 
 export type ContextRole = 'main' | 'work' | 'memory';
 export interface ContextRecord {
@@ -32,6 +35,15 @@ type Row = Record<string, unknown>;
 export class RuntimeStore {
   private readonly subscribers=new Set<()=>void>();
   private wakeScheduled=false;
+  private readonly thinking: PublicThinkingProjection;
+  private readonly replies: PublicReplyProjection;
+  private readonly snapshots: SnapshotStorage;
+  /** Configure before ingesting reasoning; unavailable secrets block that stream without exposing raw data. */
+  configurePublicThinkingSecrets(get: () => readonly string[]) { this.thinking.configureSecrets(get); this.replies.configureSecrets(get); }
+  publicThinking(seq: number) { return this.thinking.get(seq); }
+  publicReply(seq: number) { return this.replies.event(seq); }
+  publicOutput(id: string) { return this.replies.output(id); }
+  publicLegacyMessage(id: string, content: string) { return this.replies.legacyMessage(id, content); }
   eventHead(){return Number(this.db.prepare('SELECT COALESCE(MAX(seq),0) AS head FROM runtime_events').get()!.head);}
   subscribe(listener:()=>void){this.subscribers.add(listener);return ()=>{this.subscribers.delete(listener);};}
   private wake(){if(this.wakeScheduled)return;this.wakeScheduled=true;queueMicrotask(()=>{this.wakeScheduled=false;for(const listener of this.subscribers)listener();});}
@@ -51,9 +63,13 @@ export class RuntimeStore {
       CREATE TABLE IF NOT EXISTS runtime_settings(id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS runtime_operations(id TEXT PRIMARY KEY, request TEXT NOT NULL, result TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, status TEXT NOT NULL, body TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS task_notifications(id TEXT PRIMARY KEY, context_id TEXT NOT NULL, body TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS task_notifications(id TEXT PRIMARY KEY, context_id TEXT NOT NULL, body TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, cancelled INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS model_snapshots(run_id TEXT PRIMARY KEY, context_id TEXT NOT NULL, body TEXT NOT NULL);
     `);
+    if(!db.prepare('PRAGMA table_info(task_notifications)').all().some(column=>column.name==='cancelled'))db.exec('ALTER TABLE task_notifications ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0');
+    this.thinking = new PublicThinkingProjection(db);
+    this.replies = new PublicReplyProjection(db);
+    this.snapshots = new SnapshotStorage(db);
   }
   context(id: string): ContextRecord | undefined { return this.read<ContextRecord>('contexts', id); }
   contexts(query = '') { return this.all<ContextRecord>('contexts').filter(x => !query || `${x.name} ${x.purpose} ${x.id}`.toLowerCase().includes(query.toLowerCase())); }
@@ -92,8 +108,16 @@ export class RuntimeStore {
     });
   }
   event(input: { contextId: string; taskId?: string | null; runId?: string | null; kind: string; data: unknown; key?: string }) {
-    this.db.prepare('INSERT OR IGNORE INTO runtime_events(context_id,task_id,run_id,kind,data,created_at,event_key) VALUES(?,?,?,?,?,?,?)')
-      .run(input.contextId, input.taskId ?? null, input.runId ?? null, input.kind, JSON.stringify(input.data), stamp(), input.key ?? null);
+    this.atomic(() => {
+      const createdAt = stamp();
+      const result = this.db.prepare('INSERT OR IGNORE INTO runtime_events(context_id,task_id,run_id,kind,data,created_at,event_key) VALUES(?,?,?,?,?,?,?)')
+        .run(input.contextId, input.taskId ?? null, input.runId ?? null, input.kind, JSON.stringify(input.data), createdAt, input.key ?? null);
+      if (Number(result.changes) === 0) return;
+      this.thinking.observe({ seq: Number(result.lastInsertRowid), contextId: input.contextId, taskId: input.taskId ?? null,
+        runId: input.runId ?? null, kind: input.kind, data: input.data, createdAt });
+      this.replies.observe({ seq: Number(result.lastInsertRowid), contextId: input.contextId, taskId: input.taskId ?? null,
+        runId: input.runId ?? null, kind: input.kind, data: input.data, createdAt });
+    });
     this.wake();
   }
   events(contextId?: string, after = 0, limit = 100): RuntimeEvent[] {
@@ -120,7 +144,8 @@ export class RuntimeStore {
       data: JSON.parse(x.data as string), createdAt: x.created_at as string }));
   }
   setting<T>(id: string, fallback: T): T { return this.read<T>('runtime_settings', id) ?? fallback; }
-  setSetting(id: string,value:unknown){this.atomic(()=>{this.put('runtime_settings',id,value);if(['models','workspaces','mcp','memory-enabled','max-steps','default-work-model','memory-model','web','context-overflow'].includes(id))this.event({contextId:'main',kind:'configuration_state',data:{key:id}});});}
+  queueEditDocuments<T>():T[]{return this.db.prepare("SELECT body FROM runtime_settings WHERE id LIKE 'queue-edit:%' ORDER BY rowid").all().map(row=>JSON.parse(String(row.body)) as T);}
+  setSetting(id: string,value:unknown){this.atomic(()=>{this.put('runtime_settings',id,value);if(['models','workspaces','mcp','memory-enabled','memory-context-mode','memory-context-policy','max-steps','default-work-model','memory-model','web','context-overflow','auto-compaction'].includes(id))this.event({contextId:'main',kind:'configuration_state',data:{key:id}});});}
   operation<T>(key: string, request: unknown, action: () => T): T {
     const encoded = JSON.stringify(request); const previous = this.db.prepare('SELECT * FROM runtime_operations WHERE id=?').get(key);
     if (previous) { if (previous.request !== encoded) throw new AppError('operation_id_conflict', 409); return JSON.parse(previous.result as string) as T; }
@@ -134,16 +159,28 @@ export class RuntimeStore {
   decideApproval(id: string, status: ApprovalRecord['status']) {
     const record={...this.approval(id),status};this.atomic(()=>{this.db.prepare('UPDATE approvals SET status=?,body=? WHERE id=?').run(status,JSON.stringify(record),id);this.event({contextId:record.contextId,runId:record.runId,taskId:record.taskId,kind:'approval_state',data:{id,status}});});return record;
   }
-  notify(id: string, contextId: string, data: unknown) { this.db.prepare('INSERT OR IGNORE INTO task_notifications(id,context_id,body) VALUES(?,?,?)').run(id, contextId, JSON.stringify(data)); }
-  pendingNotifications() { return this.db.prepare('SELECT * FROM task_notifications WHERE delivered=0').all().map(x => ({ id: x.id as string, contextId: x.context_id as string, data: JSON.parse(x.body as string) as unknown })); }
+  // Reserved pending state 2 keeps opt-in companion wakes invisible to older
+  // clients whose outbox query only understands pending 0 and acknowledged 1.
+  notify(id: string, contextId: string, data: unknown) { const pending=data&&typeof data==='object'&&'kind'in data&&data.kind==='companion-wake'?2:0;this.db.prepare('INSERT OR IGNORE INTO task_notifications(id,context_id,body,delivered) VALUES(?,?,?,?)').run(id, contextId, JSON.stringify(data),pending); }
+  pendingNotifications() { return this.db.prepare('SELECT * FROM task_notifications WHERE delivered IN (0,2) AND cancelled=0').all().map(x => ({ id: x.id as string, contextId: x.context_id as string, data: JSON.parse(x.body as string) as unknown })); }
+  cancelNotification(id:string){this.db.prepare('UPDATE task_notifications SET cancelled=1 WHERE id=? AND delivered IN (0,2)').run(id);}
   notified(id: string) { this.db.prepare('UPDATE task_notifications SET delivered=1 WHERE id=?').run(id); }
-  snapshot(contextId: string, runId: string, body: unknown) { this.db.prepare('INSERT INTO model_snapshots VALUES(?,?,?) ON CONFLICT(run_id) DO UPDATE SET body=excluded.body').run(runId, contextId, JSON.stringify(body)); }
-  getSnapshot(runId: string): { contextId: string; body: unknown } | undefined {
-    const row = this.db.prepare('SELECT * FROM model_snapshots WHERE run_id=?').get(runId); return row && { contextId: row.context_id as string, body: JSON.parse(row.body as string) as unknown };
+  snapshot(contextId: string, runId: string, body: unknown) { this.snapshots.put(contextId, runId, body); }
+  archiveSnapshot(contextId: string, runId: string, body: unknown, evidence: { sequence: number; sha256: string }) {
+    this.atomic(() => {
+      this.snapshot(contextId, runId, body);
+      this.event({ contextId, runId, kind: 'context_snapshot', data: evidence, key: `snapshot:${runId}` });
+    });
   }
-  recover() {
-    for (const task of this.tasks()) if (['running', 'waiting', 'pausing','cancelling'].includes(task.status)) this.updateTask(task.id, { status: 'interrupted' });
-    for (const approval of this.approvals()) if (approval.status === 'pending') this.decideApproval(approval.id, 'interrupted');
+  getSnapshot(runId: string): { contextId: string; body: unknown } | undefined {
+    const row = this.db.prepare('SELECT * FROM model_snapshots WHERE run_id=?').get(runId);
+    if (!row) return;
+    let body: unknown; try { body = JSON.parse(row.body as string); } catch { throw new AppError('context_snapshot_corrupt', 409); }
+    return { contextId: row.context_id as string, body: this.snapshots.materialize(body) };
+  }
+  recover(preservedRuns: ReadonlySet<string> = new Set(), preservedApprovals: ReadonlySet<string> = new Set()) {
+    for (const task of this.tasks()) if (['running', 'waiting', 'pausing','cancelling'].includes(task.status) && !task.runIds.some(id => preservedRuns.has(id))) this.updateTask(task.id, { status: 'interrupted' });
+    for (const approval of this.approvals()) if (approval.status === 'pending' && !preservedApprovals.has(approval.id)) this.decideApproval(approval.id, 'interrupted');
   }
   private read<T>(table: 'contexts' | 'tasks' | 'runtime_settings' | 'approvals', id: string): T | undefined {
     const row = this.db.prepare(`SELECT body FROM ${table} WHERE id=?`).get(id); return row ? JSON.parse(row.body as string) as T : undefined;
